@@ -3,30 +3,38 @@
 .env.*
 !.env.example
 *.pem
-*.key
 *_credentials*
-credentials*
-secrets/
+/secrets/
 
-# Books & runtime data
+# Books & runtime data (never commit books or models)
 *.epub
-runtime/
-data/
-storage/library/
+*.gguf
+*.safetensors
+/runtime/
+/data/
 
-# Logs & caches
+# Root-level logs / caches / tmp
+/logs/
+/cache/
+/tmp/
 *.log
-logs/
-cache/
-.cache/
-tmp/
 
-# IDE metadata
+# Dependencies (per-app .gitignore also applies)
+node_modules/
+vendor/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Local DB dumps
+*.dump
+*.sql.gz
+
+# IDE / OS metadata
 .idea/
 .vscode/
 *.swp
-*.swo
-
-# OS metadata
 .DS_Store
 Thumbs.db
