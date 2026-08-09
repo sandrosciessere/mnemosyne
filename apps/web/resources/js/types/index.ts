@@ -1,5 +1,7 @@
 import { LucideIcon } from 'lucide-react';
 
+export type UserRole = 'admin' | 'user';
+
 export interface Auth {
     user: User;
 }
@@ -32,6 +34,7 @@ export interface User {
     id: number;
     name: string;
     email: string;
+    role: UserRole;
     avatar?: string;
     email_verified_at: string | null;
     created_at: string;

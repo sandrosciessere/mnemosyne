@@ -2,9 +2,9 @@ import { NavFooter } from '@/components/nav-footer';
 import { NavMain } from '@/components/nav-main';
 import { NavUser } from '@/components/nav-user';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
-import { type NavItem } from '@/types';
-import { Link } from '@inertiajs/react';
-import { BookOpen, Folder, LayoutGrid } from 'lucide-react';
+import { type NavItem, type SharedData } from '@/types';
+import { Link, usePage } from '@inertiajs/react';
+import { Folder, LayoutGrid, Library, ListChecks, ScrollText, Search, Settings2, Users } from 'lucide-react';
 import AppLogo from './app-logo';
 
 const mainNavItems: NavItem[] = [
@@ -13,22 +13,53 @@ const mainNavItems: NavItem[] = [
         url: '/dashboard',
         icon: LayoutGrid,
     },
+    {
+        title: 'Library',
+        url: '/library',
+        icon: Library,
+    },
+    {
+        title: 'Search',
+        url: '/search',
+        icon: Search,
+    },
+    {
+        title: 'Analyses',
+        url: '/analyses',
+        icon: ScrollText,
+    },
+];
+
+const adminNavItems: NavItem[] = [
+    {
+        title: 'Processing',
+        url: '/admin/processing',
+        icon: ListChecks,
+    },
+    {
+        title: 'Users',
+        url: '/admin/users',
+        icon: Users,
+    },
+    {
+        title: 'System',
+        url: '/admin/system',
+        icon: Settings2,
+    },
 ];
 
 const footerNavItems: NavItem[] = [
     {
         title: 'Repository',
-        url: 'https://github.com/laravel/react-starter-kit',
+        url: 'https://github.com/sandrosciessere/mnemosyne',
         icon: Folder,
-    },
-    {
-        title: 'Documentation',
-        url: 'https://laravel.com/docs/starter-kits',
-        icon: BookOpen,
     },
 ];
 
 export function AppSidebar() {
+    const { auth } = usePage<SharedData>().props;
+    const isAdmin = auth.user?.role === 'admin';
+
     return (
         <Sidebar collapsible="icon" variant="inset">
             <SidebarHeader>
@@ -45,6 +76,7 @@ export function AppSidebar() {
 
             <SidebarContent>
                 <NavMain items={mainNavItems} />
+                {isAdmin && <NavMain items={adminNavItems} label="Administration" />}
             </SidebarContent>
 
             <SidebarFooter>
