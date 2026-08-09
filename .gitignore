@@ -1,0 +1,32 @@
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*_credentials*
+credentials*
+secrets/
+
+# Books & runtime data
+*.epub
+runtime/
+data/
+storage/library/
+
+# Logs & caches
+*.log
+logs/
+cache/
+.cache/
+tmp/
+
+# IDE metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS metadata
+.DS_Store
+Thumbs.db
