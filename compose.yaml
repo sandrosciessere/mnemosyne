@@ -1,0 +1,192 @@
+name: mnemosyne
+
+# Mnemosyne application stack. Only the `web` service is published on the
+# host, and only on loopback: the host nginx is the sole public entry point.
+# PostgreSQL, Redis, php-fpm and the AI worker stay on internal networks.
+
+x-app-build: &app-build
+  context: .
+  dockerfile: docker/php/Dockerfile
+  target: app
+
+services:
+  pg:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE}
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME} -d ${DB_DATABASE}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8g
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}", "--appendonly", "yes"]
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1g
+
+  app:
+    build: *app-build
+    image: mnemosyne-app:bootstrap
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ${MNEMOSYNE_DATA_ROOT:-/srv/data/mnemosyne}:/data
+    networks:
+      - edge
+      - backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f php-fpm > /dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+      target: web
+    image: mnemosyne-web:bootstrap
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MNEMOSYNE_HTTP_PORT:-8100}:80"
+    networks:
+      - edge
+    depends_on:
+      - app
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+  horizon:
+    build: *app-build
+    image: mnemosyne-app:bootstrap
+    restart: unless-stopped
+    command: ["php", "artisan", "horizon"]
+    stop_grace_period: 60s
+    env_file: .env
+    volumes:
+      - ${MNEMOSYNE_DATA_ROOT:-/srv/data/mnemosyne}:/data
+    networks:
+      - backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "php artisan horizon:status | grep -q running"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+
+  scheduler:
+    build: *app-build
+    image: mnemosyne-app:bootstrap
+    restart: unless-stopped
+    command: ["php", "artisan", "schedule:work"]
+    env_file: .env
+    volumes:
+      - ${MNEMOSYNE_DATA_ROOT:-/srv/data/mnemosyne}:/data
+    networks:
+      - backend
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
+
+  ai-worker:
+    build:
+      context: services/ai-worker
+    image: mnemosyne-ai-worker:bootstrap
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ${MNEMOSYNE_DATA_ROOT:-/srv/data/mnemosyne}:/data
+    networks:
+      - backend
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      pg:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 6g
+
+networks:
+  edge:
+  backend:
+
+volumes:
+  pg-data:
+  redis-data:
