@@ -20,7 +20,8 @@ All commands from `/srv/projects/mnemosyne` as the `mnemosyne` user.
 | Create first admin | `docker compose exec app php artisan mnemosyne:user:create-admin` |
 | Integration + E2E suite | `make test-integration` (then `make test-integration-down`) |
 | Filesystem discovery (read-only scan) | `make artisan CMD="mnemosyne:library:discover --source=<name>"` (`--dry-run`, `--limit`, `--resume=<run>`) |
-| Import a discovery manifest | `make artisan CMD="mnemosyne:library:import <run> --priority=low"` (restart-safe) |
+| Import a discovery manifest | `make artisan CMD="mnemosyne:library:import <run> --priority=low"` (restart-safe; `--limit`, `--retry-failed`) |
+| Reap ingestion quarantine leftovers | `make artisan CMD="mnemosyne:ingestion:cleanup"` (dry-run; add `--force` to delete, `--min-age-hours=N`) |
 | Stale-run check (manual) | `make artisan CMD="mnemosyne:ingestion:detect-stale --dry-run"` |
 | Pipeline smoke test | `make artisan CMD="mnemosyne:ingestion:selftest"` |
 
@@ -60,6 +61,24 @@ otherwise). Queue worker runs in the `horizon` container; scheduler in the
 - Bulk import is two phases: `discover` (read-only, resumable manifest)
   then `import <run>` (creates submissions; restart-safe). Approve via
   the admin UI or enable auto-approval before importing large batches.
+  - Non-UTF-8 filenames are safe: the manifest stores paths byte-exact
+    (base64 of the raw bytes) with a separate valid-UTF-8 `display_path`
+    for the UI/logs — latin-1 names are neither mangled nor dropped.
+  - `--resume` refuses if the source root changed since the run; a
+    `--dry-run --resume` previews without mutating the run.
+  - `import` fails an entry **retryably** if free disk is under
+    `MNEMOSYNE_MIN_FREE_DISK_BYTES` (stops the run instead of spinning);
+    re-run with `--retry-failed` once space is back. `--retry-failed`
+    re-queues transient failures **only** — symlink/containment
+    (`SECURITY:`-tagged) failures are never auto-retried.
+- `mnemosyne:ingestion:cleanup` reaps quarantine leftovers that a crash,
+  ENOSPC, or a lost claim can leave behind. It is **dry-run by default**
+  (reports only); pass `--force` to delete and `--min-age-hours=N` (default
+  1) to bound freshness. It deletes ONLY: (1) `library/incoming/{ulid}`
+  dirs no live submission still points into, and (2) stale `.tmp-*` files
+  under `library/original/**` (interrupted promotions). It NEVER touches an
+  immutable original, a live submission's incoming dir, or anything outside
+  those two trees. Run it when imports are idle.
 - New `.env` keys (see `.env.example`): `MNEMOSYNE_INTERNAL_TOKEN`
   (worker auth — generate with `openssl rand -hex 32`),
   `MNEMOSYNE_MAX_UPLOAD_BYTES`, `MNEMOSYNE_INGESTION_CONCURRENCY`,

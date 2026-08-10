@@ -327,6 +327,39 @@ is versioned and reversible.
   The real 100k library scan runs only when its bind mount and source
   entry are configured; large-scale hard-linking remains a follow-up.
 
+- **Byte-exact paths (non-UTF-8 safe).** ext4 path components are arbitrary
+  bytes; real libraries carry latin-1 filenames. The AUTHORITATIVE
+  `discovery_entries.relative_path` stores the **base64 of the raw path
+  bytes** — lossless, ASCII, bounded (fits varchar+btree), and byte-distinct,
+  so `caf\xe9.epub` and `caf\xe8.epub` remain two entries (a lossy `mb_substr`
+  mangled both to `caf?.epub`, silently dropping one via the per-run unique).
+  Import decodes it back to the exact bytes to locate the file, then re-runs
+  the symlink/realpath/containment check on those raw bytes. A separate
+  best-effort `display_path` (valid UTF-8, invalid bytes → U+FFFD) and the
+  Author/Title hints are display-only — PostgreSQL text columns cannot store
+  invalid UTF-8, and `source_reference` JSON carries `display_path` plus
+  `relative_path_b64`, never raw bytes. The resume cursor (`last_path`) is
+  base64 too. Traversal order is byte-wise (`scandir(SCANDIR_SORT_NONE)` +
+  `usort(strcmp)`), locale-independent by invariant so it always matches the
+  `pathCompare` cursor comparator even after `setlocale`.
+- **Resume safety.** `--resume` refuses when the freshly-resolved source root
+  differs from the run's persisted `root_path` (never replay a cursor from
+  root A against root B). `--dry-run --resume` previews remaining work and
+  persists nothing about lifecycle (no status flip, no counter writes).
+  `files_seen`/`unreadable` are SET (re-derived by re-walking from the root),
+  not incremented, so resumes never double-count.
+- **Quarantine hygiene.** Import copies into `library/incoming/{ulid}/` BEFORE
+  the DB claim; EVERY failure path (containment reject, ENOSPC/copy throw,
+  submission throw, concurrent-claim loss) deletes the staging dir it created,
+  and a claim loser does not inflate the `imported` counter. Before staging,
+  each entry checks the same near-full-disk guard as uploads
+  (`min_free_disk_bytes`); insufficient space is a **retryable** failure that
+  stops the run rather than spinning. `--retry-failed` returns
+  `import_failed` entries to `discovered` — **except** security/containment
+  failures, which are tagged (`SECURITY:` reason prefix) and never
+  auto-retried. Whatever still slips through a hard crash is swept by
+  `mnemosyne:ingestion:cleanup` (see runbook).
+
 ## Idempotency audit (per stage)
 
 | Stage | Durable input | Durable output | Idempotency strategy | Retry class |

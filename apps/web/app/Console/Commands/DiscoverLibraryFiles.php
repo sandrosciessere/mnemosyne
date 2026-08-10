@@ -19,6 +19,9 @@ class DiscoverLibraryFiles extends Command
 {
     private const BATCH_SIZE = 500;
 
+    /** Counters re-derived by re-walking from the root; SET, never increment. */
+    private const REWALKED_COUNTERS = ['files_seen', 'unreadable'];
+
     protected $signature = 'mnemosyne:library:discover
         {--source= : Import source name (see MNEMOSYNE_IMPORT_SOURCES)}
         {--resume= : Public id of an interrupted discovery run to resume}
@@ -68,18 +71,39 @@ class DiscoverLibraryFiles extends Command
             return self::FAILURE;
         }
 
-        if (! $dryRun && $run === null) {
-            $run = new DiscoveryRun;
-            $run->forceFill([
-                'source_name' => $sourceName,
-                'root_path' => $root,
-                'status' => 'running',
-                'started_at' => now(),
-            ])->save();
-            $this->info("discovery run {$run->public_id} started");
+        // Resume must pin the source root: a cursor recorded against root A
+        // is meaningless against root B. If the freshly-resolved root no
+        // longer matches the run's persisted root, refuse rather than apply
+        // a stale cursor to a different tree.
+        if ($run !== null && $run->root_path !== $root) {
+            $this->error(sprintf(
+                'Source root changed since this run (was %s, now %s); refusing to resume.',
+                $run->root_path,
+                $root,
+            ));
+
+            return self::FAILURE;
+        }
+
+        if (! $dryRun) {
+            if ($run === null) {
+                $run = new DiscoveryRun;
+                $run->forceFill([
+                    'source_name' => $sourceName,
+                    'root_path' => $root,
+                    'status' => 'running',
+                    'started_at' => now(),
+                ])->save();
+                $this->info("discovery run {$run->public_id} started");
+            } else {
+                $run->forceFill(['status' => 'running', 'finished_at' => null])->save();
+                $this->info("resuming discovery run {$run->public_id} from its durable cursor");
+            }
         } elseif ($run !== null) {
-            $run->forceFill(['status' => 'running', 'finished_at' => null])->save();
-            $this->info("resuming discovery run {$run->public_id} after '{$run->last_path}'");
+            // Dry-run + resume: read the cursor to preview remaining work,
+            // but persist NOTHING about lifecycle (no status flip, no
+            // finished_at reset) — a dry run must never mutate/strand a run.
+            $this->info("dry-run preview from the cursor of {$run->public_id} (no state changes)");
         }
 
         $counters = [
@@ -91,7 +115,13 @@ class DiscoverLibraryFiles extends Command
         ];
         $this->flushedCounters = array_fill_keys(array_keys($counters), 0);
         $buffer = [];
-        $lastPath = $run?->last_path;
+        // The durable resume cursor is stored base64-encoded (byte-exact);
+        // decode it back to raw bytes so pathCompare() runs against the very
+        // bytes walk() yields.
+        $lastPath = $run?->last_path !== null ? base64_decode($run->last_path, true) : null;
+        if ($lastPath === false) {
+            $lastPath = null;
+        }
         $limitReached = false;
 
         foreach ($this->walk($root, '', $counters) as $relative) {
@@ -121,15 +151,23 @@ class DiscoverLibraryFiles extends Command
             $counters['epubs_found']++;
 
             if ($dryRun) {
-                $this->line("[dry-run] {$relative}");
+                $this->line('[dry-run] '.DiscoveryEntry::toDisplayString($relative));
             } else {
+                // $relative is RAW filesystem bytes (ext4 paths are arbitrary
+                // bytes). The AUTHORITATIVE relative_path is their base64 —
+                // lossless, ASCII, byte-distinct, index-safe — so "caf\xe9"
+                // and "caf\xe8" stay distinct and import can reconstruct the
+                // exact path. display_path + hints are best-effort valid
+                // UTF-8 for humans/logs only (PostgreSQL rejects invalid
+                // UTF-8 in text columns).
                 $segments = explode('/', str_replace(DIRECTORY_SEPARATOR, '/', $relative));
                 $buffer[] = [
                     'discovery_run_id' => $run->id,
-                    'relative_path' => mb_substr($relative, 0, 1000),
+                    'relative_path' => DiscoveryEntry::encodeRelativePath($relative),
+                    'display_path' => DiscoveryEntry::toDisplayString($relative, 1000),
                     'size_bytes' => @filesize($absolute) ?: null,
-                    'author_hint' => count($segments) >= 3 ? mb_substr($segments[0], 0, 500) : null,
-                    'title_hint' => count($segments) >= 3 ? mb_substr($segments[1], 0, 500) : null,
+                    'author_hint' => count($segments) >= 3 ? DiscoveryEntry::toDisplayString($segments[0], 500) : null,
+                    'title_hint' => count($segments) >= 3 ? DiscoveryEntry::toDisplayString($segments[1], 500) : null,
                     'status' => 'discovered',
                     'created_at' => now(),
                     'updated_at' => now(),
@@ -187,13 +225,19 @@ class DiscoverLibraryFiles extends Command
     private function walk(string $root, string $dir, array &$counters): Generator
     {
         $absolute = $dir === '' ? $root : $root.DIRECTORY_SEPARATOR.$dir;
-        $names = @scandir($absolute, SCANDIR_SORT_ASCENDING);
+        // INVARIANT: traversal order MUST be byte-wise (strcmp), matching the
+        // resume cursor comparator pathCompare(). SCANDIR_SORT_ASCENDING is
+        // locale-collated — setlocale(LC_ALL, ...) can reorder it and desync
+        // it from the cursor — so sort explicitly with strcmp instead.
+        $names = @scandir($absolute, SCANDIR_SORT_NONE);
 
         if ($names === false) {
             $counters['unreadable']++;
 
             return;
         }
+
+        usort($names, 'strcmp');
 
         foreach ($names as $name) {
             if ($name === '.' || $name === '..') {
@@ -253,7 +297,14 @@ class DiscoverLibraryFiles extends Command
 
             $updates = [];
             foreach ($counters as $key => $value) {
-                $updates[$key] = $run->{$key} + ($value - $this->flushedCounters[$key]);
+                // files_seen / unreadable are re-derived by re-walking from
+                // the root on every (re)start, so SET them to the absolute
+                // in-memory tally — incrementing would double-count the
+                // pre-cursor range on each resume. epubs/entries/skips are
+                // only tallied PAST the cursor, so those accumulate as deltas.
+                $updates[$key] = in_array($key, self::REWALKED_COUNTERS, true)
+                    ? $value
+                    : $run->{$key} + ($value - $this->flushedCounters[$key]);
             }
 
             if ($buffer !== []) {

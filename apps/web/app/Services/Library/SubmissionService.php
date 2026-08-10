@@ -67,9 +67,12 @@ class SubmissionService
     }
 
     /**
-     * Filesystem discovery path (mnemosyne:library:discover). The file is
-     * NOT copied here; the hash stage reads it from the allowlisted import
-     * root recorded in source_reference.
+     * Bulk-import path (mnemosyne:library:import). The caller has already
+     * copied the source file into the incoming quarantine (atomically) and
+     * passes its data-root-relative path as $incomingRelativePath; the hash
+     * stage reads it from there. `source_reference` keeps the provenance
+     * (display path + base64 of the exact source bytes) for audit only —
+     * the pipeline never re-reads the original source tree after import.
      */
     public function createFromFilesystem(
         string $incomingRelativePath,
@@ -77,6 +80,19 @@ class SubmissionService
         array $sourceReference,
         IngestionPriority $priority = IngestionPriority::Low,
     ): BookSubmission {
+        // Same cheap near-full-disk guard as createFromUpload: never accept
+        // a filesystem submission onto a disk without the configured margin.
+        // The file has already been staged into incoming by the caller, so
+        // measure it (best effort) and include it in the required headroom.
+        $size = (int) ($this->storage->disk()->size($incomingRelativePath) ?: 0);
+
+        if (! $this->storage->hasFreeSpaceFor($size)) {
+            throw new StorageException(
+                'INSUFFICIENT_STORAGE',
+                'Not enough free space to accept this filesystem submission right now.',
+            );
+        }
+
         $submission = new BookSubmission;
         $submission->forceFill([
             'user_id' => null,
