@@ -16,9 +16,11 @@ Schedule::call(function () {
     Cache::put(SchedulerHealthcheck::HEARTBEAT_CACHE_KEY, now()->timestamp, 600);
 })->name('scheduler-heartbeat')->everyMinute();
 
-// Stale ingestion detection: marks dead runs failed (admin-retryable) and
-// requeues queued runs whose job was lost. Threshold is configurable via
-// MNEMOSYNE_INGESTION_STALE_MINUTES — never a tight arbitrary timeout.
+// Stale ingestion detection: marks a run whose worker went silent mid-stage
+// failed (admin-retryable). A queued backlog wait is NEVER treated as stale
+// (that caused duplicate dispatch); recovering a genuinely lost queued job
+// is the explicit, guard-safe `mnemosyne:ingestion:requeue-lost` command.
+// Threshold is configurable via MNEMOSYNE_INGESTION_STALE_MINUTES.
 Schedule::command('mnemosyne:ingestion:detect-stale')
     ->everyFiveMinutes()
     ->withoutOverlapping();
