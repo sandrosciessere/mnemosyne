@@ -28,12 +28,6 @@ return new class extends Migration
             $table->timestamps();
 
             $table->unique(['ingestion_run_id', 'stage', 'attempt']);
-
-            // Control-plane aggregates over an append-only table that reaches
-            // 500k+ rows: throughput (succeeded attempts per stage in a
-            // window) and retry rate (attempt > 1 in a window).
-            $table->index(['status', 'finished_at', 'stage']);
-            $table->index(['attempt', 'started_at']);
         });
     }
 

@@ -14,11 +14,7 @@ return new class extends Migration
             $table->ulid('public_id')->unique();
             $table->foreignId('book_submission_id')->constrained()->cascadeOnDelete();
             // Assigned once the hash stage has identified/created the asset.
-            // nullOnDelete (not cascade): several submissions' runs can share
-            // one asset (exact-duplicate adoption), so deleting an asset must
-            // never destroy the append-only ingestion history of unrelated
-            // submissions — the attribution is nulled, the audit trail stays.
-            $table->foreignId('book_asset_id')->nullable()->constrained()->nullOnDelete();
+            $table->foreignId('book_asset_id')->nullable()->constrained()->cascadeOnDelete();
             $table->string('pipeline_version', 16);
             $table->string('status', 32)->default('queued');
             $table->string('current_stage', 32)->nullable();
@@ -43,9 +39,6 @@ return new class extends Migration
             $table->index(['status', 'heartbeat_at']);
             $table->index(['book_asset_id']);
             $table->index(['current_stage']);
-            // Control plane: recent failures/completions filter by status and
-            // order by finished_at at 100k+ scale.
-            $table->index(['status', 'finished_at']);
         });
 
         // One pipeline at a time per submission (and per identified asset).
