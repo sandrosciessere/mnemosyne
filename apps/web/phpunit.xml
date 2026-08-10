@@ -11,6 +11,12 @@
         <testsuite name="Feature">
             <directory>tests/Feature</directory>
         </testsuite>
+        <!-- Runs against the compose "test" profile (pg-test/ai-worker-test
+             on loopback). Self-skips when those services are not up; use
+             `make test-integration` to run it for real. -->
+        <testsuite name="Integration">
+            <directory>tests/Integration</directory>
+        </testsuite>
     </testsuites>
     <source>
         <include>
