@@ -29,16 +29,28 @@ _FINGERPRINT_TYPES = {
 }
 
 
-def content_fingerprint(nodes: list[dict]) -> str:
-    """nodes: all book nodes in ascending ordinal order."""
-    texts = [
-        node["text"]
-        for node in sorted(nodes, key=lambda n: n["ordinal"])
-        if node["linear"]
+def fingerprint_included(node: dict) -> bool:
+    """Single source of truth for fingerprint-corpus membership.
+
+    Used both here (content_sha256) and by the normalize stage when it
+    assembles ``canonical.txt`` and assigns node offsets, which guarantees
+    sha256(canonical.txt) == content_sha256 by construction.
+    """
+    return (
+        bool(node["linear"])
         and node["type"] in _FINGERPRINT_TYPES
         and not (node["type"] == "figure" and node["has_image"])
-    ]
-    return hashlib.sha256("\n".join(texts).encode("utf-8")).hexdigest()
+    )
+
+
+def corpus_texts(nodes: list[dict]) -> list[str]:
+    """Fingerprint corpus texts in ascending ordinal order."""
+    return [node["text"] for node in sorted(nodes, key=lambda n: n["ordinal"]) if fingerprint_included(node)]
+
+
+def content_fingerprint(nodes: list[dict]) -> str:
+    """nodes: all book nodes in ascending ordinal order."""
+    return hashlib.sha256("\n".join(corpus_texts(nodes)).encode("utf-8")).hexdigest()
 
 
 def build_sections(docs: list[tuple[int, list[dict]]]) -> list[dict]:

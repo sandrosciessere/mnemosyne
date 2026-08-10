@@ -21,7 +21,7 @@ send `X-Mnemosyne-Internal-Token`; interactive docs are disabled):
 |---|---|---|
 | `/epub/validate` | `{asset_ref, relative_path, correlation_id?}` | zip safety report, container/mimetype/encryption checks, OPF quick parse (version, spine/manifest counts) |
 | `/epub/parse` | `{asset_ref, relative_path, artifact_dir, pipeline_version, source_sha256, correlation_id?}` | full OPF metadata; writes `metadata.json`; returns normalized metadata inline |
-| `/epub/normalize` | same as parse | writes `spine/NNNN.jsonl` node artifacts; returns counts |
+| `/epub/normalize` | same as parse | writes `spine/NNNN.jsonl` node artifacts, `sanitized/NNNN.xhtml` source documents and `canonical.txt`; returns counts |
 | `/epub/structure` | same as parse | reads the spine JSONL (content docs are **not** re-parsed), writes `structure.json`, returns fingerprint + TOC/spine summary |
 
 All paths (`relative_path`, `artifact_dir`) are relative to
@@ -53,9 +53,12 @@ Status derivation: any `hard_block` → `failed`; else any `reviewable` →
 return HTTP 500 with the same envelope (`INTERNAL_ERROR`, generic
 message; the traceback is only logged, with the correlation id).
 
-Handler versions (`app/versions.py`): `VALIDATOR_VERSION`,
-`PARSER_VERSION`, `NORMALIZER_VERSION`, `STRUCTURER_VERSION`, all
-`1.0.0`.
+Handler versions (`app/versions.py`): `VALIDATOR_VERSION` `1.0.0`,
+`PARSER_VERSION` `1.0.0`, `NORMALIZER_VERSION` `1.1.0`,
+`STRUCTURER_VERSION` `1.1.0`. The 1.1.0 bump adds the sanitized source
+artifacts, `canonical.txt` and the citation-oriented node fields below;
+`FINGERPRINT_VERSION` stays `"1"` and `content_sha256` for a given file
+is identical to the 1.0.0 output.
 
 ## Issue codes
 
@@ -117,15 +120,81 @@ Written atomically (`<name>.tmp-<pid>` + fsync + `os.replace`) under
   (`source: epub_opf`, `opf_path`, `handler_version`)
 - `spine/NNNN.jsonl` — one node per line:
   `{node_id, spine_index, ordinal, type, level, text, heading_path,
-  source: {href, fragment}, lang, linear, char_count, has_image}`
+  source: {href, fragment}, lang, linear, char_count, has_image,
+  is_note, refs, table, image, source_hash, normalized_start,
+  normalized_end}` (see “Node fields” below)
+- `sanitized/NNNN.xhtml` — sanitized copy of the ORIGINAL spine content
+  document (same `NNNN` as the spine JSONL; written only for textual
+  spine items). Well-formed XML, inert (see “Sanitization rules”), root
+  carries `data-mnemosyne-source-href` (zip-internal spine href) and
+  `data-mnemosyne-spine-index` for traceability.
+- `canonical.txt` — UTF-8; EXACTLY the fingerprint corpus: the texts of
+  the included nodes joined with single `\n` in ascending ordinal order
+  (no trailing newline). Invariant: `sha256(canonical.txt bytes) ==
+  content_sha256` from `structure.json`.
 - `structure.json` — sections, TOC mapping, spine summary, fingerprint
 - `manifest.json` — `{asset_ref, pipeline_version, source_sha256,
   generated_at, stages, outputs (path/sha256/bytes), warnings}`;
   rewritten completely at each stage completion, rebuilt if corrupt.
 
+### Node fields added in normalizer 1.1.0
+
+- `normalized_start` / `normalized_end` — **unicode codepoint** offsets
+  into the decoded `canonical.txt` string such that
+  `canonical_text[normalized_start:normalized_end] == text`. `null` for
+  nodes excluded from the fingerprint corpus (figure nodes with
+  `has_image`, and every node of a `linear: false` spine document).
+  Offsets are assigned after the whole book is extracted, because the
+  corpus spans all spine documents.
+- `source_hash` — sha256 hex of the UTF-8 bytes of
+  `f"{source_href}\x00{fragment or ''}\x00{node_type}\x00{text}"`.
+  Stale-citation detector: deterministic and timestamp-free, so it is
+  stable across artifact regenerations while the underlying source
+  location and content are unchanged, and changes whenever the text,
+  the anchor or the location changes.
+- `refs` — list of `{kind: "link"|"noteref", href, fragment}` for every
+  internal `<a>` (and `epub:type="noteref"` anchor) inside the block;
+  `href` is the target document resolved to a zip-root path (same
+  namespace as `source.href`), or `null` for same-document targets;
+  `fragment` is the anchor or `null`. Remote/external links are never
+  included (they are neutralized). `null` when the block has no
+  internal links.
+- `is_note` — `true` for nodes extracted from elements whose
+  `epub:type` carries a note token (`footnote`, `endnote`, `note`,
+  `rearnote`, …); text extraction is otherwise unchanged.
+- `table` — on `table` nodes only:
+  `{caption: string|null, rows: [[cell text, …], …]}` preserving
+  row/cell order (`th` and `td` both as text). The flat tab/newline
+  `text` behaviour is unchanged (fingerprint corpus is untouched).
+- `image` — on figure nodes with `has_image`:
+  `{href: string|null, alt: string|null}`; `href` is the image source
+  resolved to a zip-root path (`null` for inline SVG or a neutralized
+  remote source), `alt` from `img@alt` or the SVG `<title>`/`<desc>`.
+  Inline SVG blocks are treated as figures.
+
+### Sanitization rules (`sanitized/NNNN.xhtml`)
+
+| Rule | Treatment |
+|---|---|
+| `script`, `style`, `template`, `iframe`, `object`, `embed`, `form`, `input`, `button`, `base`, `foreignObject` | subtree removed entirely |
+| `meta http-equiv="refresh"` | removed |
+| `audio` / `video` / `source` with remote references | removed |
+| `on*` event attributes | removed |
+| attribute values starting with `javascript:` (or `vbscript:`) | attribute removed |
+| `src` / `href` / `xlink:href` / `poster` / `data` / `srcset` with `http:` / `https:` / `ftp:` scheme or protocol-relative `//` | attribute dropped (URL never kept); element marked `data-mnemosyne-removed-remote="1"` |
+| comments, processing instructions, DTD | dropped (only our own XML declaration is emitted) |
+| `id`, `epub:type`, `xml:lang`/`lang`, structural tags, internal/relative hrefs and fragment anchors, relative `img@src`, sanitized inline SVG | preserved unchanged |
+
+Documents that fail XML parsing take the `html.parser` fallback (with
+the existing `XHTML_NOT_WELL_FORMED` warning): a best-effort tree is
+reconstructed and run through the **same** sanitization pass, so even
+fallback output is well-formed XML and never contains scripts or remote
+references.
+
 ## Determinism guarantees
 
-Same input file + same handler versions ⇒ byte-identical spine JSONL and
+Same input file + same handler versions ⇒ byte-identical spine JSONL,
+`sanitized/NNNN.xhtml`, `canonical.txt` and
 `structure.json`, identical `content_sha256`, identical node ids
 (`n{spine:04d}-{ordinal:06d}`, global ordinal ascending from 0).
 No randomness, no dict-order dependence, no timestamps in artifact

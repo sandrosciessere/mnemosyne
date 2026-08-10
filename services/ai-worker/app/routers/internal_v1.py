@@ -210,12 +210,21 @@ def epub_normalize(req: StageRequest) -> JSONResponse:
             package = _load_package(zf, limits, issues)
             docs = normalize.normalize_book(zf, package, limits, issues, deadline)
 
+        # Canonical offsets span the whole book, so they are (re)applied after
+        # every spine document has been extracted, before any JSONL is written.
+        canonical_text = normalize.apply_canonical_offsets(docs)
         outputs: list[str] = []
         for doc in docs:
             deadline.check()
             rel = normalize.spine_artifact_name(doc.spine_index)
             artifacts.write_bytes_atomic(artifact_dir / rel, normalize.doc_to_jsonl(doc))
             outputs.append(rel)
+            if doc.sanitized is not None:
+                sanitized_rel = normalize.sanitized_artifact_name(doc.spine_index)
+                artifacts.write_bytes_atomic(artifact_dir / sanitized_rel, doc.sanitized)
+                outputs.append(sanitized_rel)
+        artifacts.write_bytes_atomic(artifact_dir / normalize.CANONICAL_FILE, canonical_text.encode("utf-8"))
+        outputs.append(normalize.CANONICAL_FILE)
         artifacts.update_manifest(
             artifact_dir,
             asset_ref=req.asset_ref,
@@ -232,6 +241,8 @@ def epub_normalize(req: StageRequest) -> JSONResponse:
             "nodes": sum(len(doc.nodes) for doc in docs),
             "chars": sum(doc.char_count for doc in docs),
             "image_only_documents": sum(1 for doc in docs if doc.image_only),
+            "canonical_chars": len(canonical_text),
+            "sanitized_documents": sum(1 for doc in docs if doc.sanitized is not None),
         }
 
     return _execute("normalize", versions.NORMALIZER_VERSION, req.correlation_id, run)

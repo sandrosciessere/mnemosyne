@@ -215,13 +215,17 @@ def test_pipeline_e2e(client, install_epub, data_root):
     assert manifest["pipeline_version"] == "pv-1"
     assert manifest["source_sha256"] == "0" * 64
     assert set(manifest["stages"].keys()) == {"parse", "normalize", "structure"}
+    assert manifest["stages"]["parse"]["handler_version"] == "1.0.0"
+    assert manifest["stages"]["normalize"]["handler_version"] == "1.1.0"
+    assert manifest["stages"]["structure"]["handler_version"] == "1.1.0"
     for stage in manifest["stages"].values():
-        assert stage["handler_version"] == "1.0.0"
         assert "completed_at" in stage
     output_paths = {entry["path"] for entry in manifest["outputs"]}
     assert "metadata.json" in output_paths
     assert "structure.json" in output_paths
     assert "spine/0000.jsonl" in output_paths
+    assert "sanitized/0000.xhtml" in output_paths
+    assert "canonical.txt" in output_paths
     for entry in manifest["outputs"]:
         assert len(entry["sha256"]) == 64
         assert entry["bytes"] == (artifact_dir / entry["path"]).stat().st_size

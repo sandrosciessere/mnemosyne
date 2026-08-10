@@ -75,10 +75,23 @@ def test_node_shape_and_source():
         "linear",
         "char_count",
         "has_image",
+        "is_note",
+        "refs",
+        "table",
+        "image",
+        "source_hash",
+        "normalized_start",
+        "normalized_end",
     }
     assert node["source"] == {"href": "OEBPS/text/ch1.xhtml", "fragment": "p-key"}
     assert node["linear"] is True
     assert node["char_count"] == len(node["text"])
+    assert node["is_note"] is False
+    assert node["refs"] == [{"kind": "link", "href": "OEBPS/text/ch2.xhtml", "fragment": None}]
+    assert node["table"] is None
+    assert node["image"] is None
+    assert len(node["source_hash"]) == 64
+    assert node["normalized_end"] - node["normalized_start"] == node["char_count"]
 
 
 def test_normalization_is_deterministic():

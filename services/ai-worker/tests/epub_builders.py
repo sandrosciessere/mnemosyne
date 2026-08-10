@@ -333,3 +333,167 @@ def build_same_text_different_cover() -> tuple[bytes, bytes]:
 
 def build_not_a_zip() -> bytes:
     return b"this is definitely not a zip archive"
+
+
+# --- rich compatibility fixture ---------------------------------------------
+# Nine spine documents exercising nested headings, multilingual text,
+# footnotes/noterefs, tables, figures/SVG, sanitization targets, a
+# recoverable-HTML fallback document, cross-doc links and a non-linear doc.
+
+
+def rich_headings() -> str:
+    return _xhtml(
+        '<h1 id="rh1">Part One</h1>\n'
+        "<p>Intro text for part one.</p>\n"
+        '<h2 id="rh2">Chapter A</h2>\n'
+        "<p>Alpha body text.</p>\n"
+        '<h3 id="rh3">Topic A.1</h3>\n'
+        "<p>Deep topic text.</p>\n"
+        '<h4 id="rh4">Detail A.1.a</h4>\n'
+        "<p>Deepest detail text.</p>"
+    )
+
+
+def rich_multilingual() -> str:
+    return _xhtml(
+        '<h1 id="ml">Languages</h1>\n'
+        '<p xml:lang="el" id="p-el">Ελληνικό κείμενο δοκιμής.</p>\n'
+        '<p xml:lang="ru" id="p-ru">Русский текст для теста.</p>\n'
+        '<p xml:lang="zh" id="p-zh">中文测试文本。</p>\n'
+        "<p>Mixed ASCII tail.</p>",
+        lang="en",
+    )
+
+
+def rich_notes_host() -> str:
+    return _xhtml(
+        '<h1 id="nh">Noted</h1>\n'
+        '<p id="claim">A claim needing support.'
+        '<a epub:type="noteref" href="notes.xhtml#fn1" id="ref1">1</a></p>\n'
+        '<p>See <a href="rich1.xhtml#rh2">Chapter A</a> for more.</p>'
+    )
+
+
+def rich_notes() -> str:
+    return _xhtml(
+        '<h1 id="notes-title">Notes</h1>\n'
+        '<aside epub:type="footnote" id="fn1">'
+        '<p>The supporting footnote text. <a href="rich3.xhtml#ref1">back</a></p></aside>'
+    )
+
+
+def rich_table() -> str:
+    return _xhtml(
+        '<h1 id="th">Data</h1>\n'
+        '<table id="tbl1"><caption>Sample caption</caption>\n'
+        "<thead><tr><th>Name</th><th>Value</th></tr></thead>\n"
+        "<tbody><tr><td>Row one</td><td>1</td></tr><tr><td>Row two</td><td>2</td></tr></tbody></table>"
+    )
+
+
+def rich_media() -> str:
+    return _xhtml(
+        '<h1 id="mh">Media</h1>\n'
+        '<figure id="fig-img"><img src="../images/cover.png" alt="Cover art"/>'
+        "<figcaption>Cover figure.</figcaption></figure>\n"
+        '<figure id="fig-svg"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
+        '<title>Tiny circle</title><circle cx="5" cy="5" r="4"/></svg></figure>\n'
+        '<p id="rem"><img src="https://example.invalid/pic.png" alt="remote art"/></p>\n'
+        '<p onclick="evil()" id="evt">Handled text.</p>\n'
+        "<script>var x = 1;</script>\n"
+        '<p id="links"><a href="http://example.invalid/page">external</a> and '
+        '<a href="rich1.xhtml#rh1">internal</a>.</p>'
+    )
+
+
+RICH_BROKEN = (
+    "<html><body><h1 id='bt'>Broken Chapter"
+    "<p>First broken paragraph.<br><img src='../images/cover.png' alt='broken art'>"
+    "<p>Second broken paragraph with <a href='rich1.xhtml#rh1'>a link</a>."
+    "<p>Third with remote <img src='http://example.invalid/x.png' alt='r'>.</body>"
+)
+
+
+def rich_links() -> str:
+    return _xhtml(
+        '<h1 id="lk">Links</h1>\n'
+        '<p>See <a href="notes.xhtml#fn1">note one</a> and <a href="#local">a local anchor</a>.</p>\n'
+        '<p id="local">The local anchor target paragraph.</p>'
+    )
+
+
+def rich_colophon() -> str:
+    return _xhtml('<h1 id="cx">Colophon</h1>\n<p>Nonlinear colophon text.</p>')
+
+
+RICH_NAV = (
+    '<?xml version="1.0" encoding="UTF-8"?>\n'
+    '<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops">'
+    "<head><title>Nav</title></head><body>"
+    '<nav epub:type="toc"><ol>'
+    '<li><a href="text/rich1.xhtml#rh1">Part One</a>'
+    '<ol><li><a href="text/rich1.xhtml#rh2">Chapter A</a></li></ol></li>'
+    '<li><a href="text/rich2.xhtml#ml">Languages</a></li>'
+    '<li><a href="text/rich4.xhtml#th">Data</a></li>'
+    "</ol></nav>"
+    "</body></html>"
+)
+
+
+def _rich_opf() -> str:
+    items = "\n".join(
+        f'    <item id="r{index}" href="text/{name}" media-type="application/xhtml+xml"/>'
+        for index, name in enumerate(
+            [
+                "rich1.xhtml",
+                "rich2.xhtml",
+                "rich3.xhtml",
+                "notes.xhtml",
+                "rich4.xhtml",
+                "rich5.xhtml",
+                "rich6.xhtml",
+                "rich7.xhtml",
+                "colophon.xhtml",
+            ]
+        )
+    )
+    refs = "\n".join(
+        f'    <itemref idref="r{index}"{" linear=\"no\"" if index == 8 else ""}/>' for index in range(9)
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="pub-id" xml:lang="en">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>The Rich Synthetic Book</dc:title>
+    <dc:creator>Rich Author</dc:creator>
+    <dc:language>en</dc:language>
+    <dc:identifier id="pub-id">urn:uuid:{UUID_B}</dc:identifier>
+  </metadata>
+  <manifest>
+    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
+    <item id="cover-img" href="images/cover.png" media-type="image/png" properties="cover-image"/>
+{items}
+  </manifest>
+  <spine>
+{refs}
+  </spine>
+</package>
+"""
+
+
+def build_rich_epub() -> bytes:
+    entries = [
+        ("META-INF/container.xml", CONTAINER_XML),
+        ("OEBPS/content.opf", _rich_opf()),
+        ("OEBPS/nav.xhtml", RICH_NAV),
+        ("OEBPS/images/cover.png", PNG_A),
+        ("OEBPS/text/rich1.xhtml", rich_headings()),
+        ("OEBPS/text/rich2.xhtml", rich_multilingual()),
+        ("OEBPS/text/rich3.xhtml", rich_notes_host()),
+        ("OEBPS/text/notes.xhtml", rich_notes()),
+        ("OEBPS/text/rich4.xhtml", rich_table()),
+        ("OEBPS/text/rich5.xhtml", rich_media()),
+        ("OEBPS/text/rich6.xhtml", RICH_BROKEN),
+        ("OEBPS/text/rich7.xhtml", rich_links()),
+        ("OEBPS/text/colophon.xhtml", rich_colophon()),
+    ]
+    return _zip_bytes(entries)

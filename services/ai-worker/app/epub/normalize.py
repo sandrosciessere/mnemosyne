@@ -4,8 +4,15 @@ Node ids are ``n{spine_index:04d}-{ordinal:06d}`` with a single global
 ordinal counter across the whole book (ascending reading order, starting
 at 0). Non-linear spine items are included but marked ``linear: false``.
 The heading stack (for ``heading_path``) resets at each spine document.
+
+Because the fingerprint corpus spans the whole book, canonical offsets
+(``normalized_start``/``normalized_end``) are assigned only after every
+spine document has been extracted (see :func:`apply_canonical_offsets`),
+then the spine JSONL files, ``canonical.txt`` and the sanitized source
+documents are written together by the /epub/normalize endpoint.
 """
 
+import hashlib
 import json
 import zipfile
 from dataclasses import dataclass, field
@@ -14,7 +21,11 @@ from app.config import Limits
 from app.epub.issues import Deadline, Issue, reviewable, warning
 from app.epub.opf import PackageDoc, resolve_href
 from app.epub.safety import read_member
+from app.epub.sanitize import sanitize_document
+from app.epub.structure import fingerprint_included
 from app.epub.xhtml import extract_blocks
+
+CANONICAL_FILE = "canonical.txt"
 
 _TEXTUAL_MEDIA_TYPES = {"application/xhtml+xml", "text/html", "application/x-dtbook+xml"}
 _IMAGE_MEDIA_PREFIX = "image/"
@@ -29,6 +40,7 @@ class DocResult:
     nodes: list[dict] = field(default_factory=list)
     char_count: int = 0
     has_images: bool = False
+    sanitized: bytes | None = None  # sanitized source XHTML (content docs only)
 
     @property
     def image_only(self) -> bool:
@@ -37,6 +49,43 @@ class DocResult:
 
 def node_id(spine_index: int, ordinal: int) -> str:
     return f"n{spine_index:04d}-{ordinal:06d}"
+
+
+def source_hash(source_href: str, fragment: str | None, node_type: str, text: str) -> str:
+    """Stale-citation detector: sha256 over location + anchor + type + text.
+
+    Deterministic and timestamp-free: stable across artifact regeneration
+    while the underlying source location and content are unchanged; changes
+    whenever the text, the anchor or the location changes.
+    """
+    payload = f"{source_href}\x00{fragment or ''}\x00{node_type}\x00{text}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def apply_canonical_offsets(docs: list[DocResult]) -> str:
+    """Assign unicode-codepoint offsets into the canonical text; returns it.
+
+    The canonical text is EXACTLY the fingerprint corpus (same inclusion
+    rules and order as ``structure.content_fingerprint``, single ``\\n``
+    separators, no trailing newline), so sha256 of its UTF-8 bytes equals
+    ``content_sha256``. Nodes excluded from the corpus keep ``None``.
+    Idempotent: nodes are already in ascending global-ordinal order.
+    """
+    texts: list[str] = []
+    position = 0
+    for doc in docs:
+        for node in doc.nodes:
+            if fingerprint_included(node):
+                if texts:
+                    position += 1  # the '\n' separator
+                node["normalized_start"] = position
+                position += len(node["text"])
+                node["normalized_end"] = position
+                texts.append(node["text"])
+            else:
+                node["normalized_start"] = None
+                node["normalized_end"] = None
+    return "\n".join(texts)
 
 
 def normalize_book(
@@ -69,6 +118,7 @@ def normalize_book(
             continue
 
         data = read_member(zf, href, limits)
+        doc.sanitized = sanitize_document(data, href, spine_index)
         blocks = extract_blocks(data, href, issues)
 
         heading_stack: list[tuple[int, str]] = []
@@ -89,6 +139,13 @@ def normalize_book(
                 "linear": ref.linear,
                 "char_count": len(block.text),
                 "has_image": block.has_image,
+                "is_note": block.is_note,
+                "refs": block.refs or None,
+                "table": block.table,
+                "image": block.image,
+                "source_hash": source_hash(href, block.fragment, block.type, block.text),
+                "normalized_start": None,
+                "normalized_end": None,
             }
             doc.nodes.append(node)
             doc.char_count += len(block.text)
@@ -116,6 +173,7 @@ def normalize_book(
             )
         )
 
+    apply_canonical_offsets(docs)
     return docs
 
 
@@ -129,3 +187,7 @@ def doc_to_jsonl(doc: DocResult) -> bytes:
 
 def spine_artifact_name(spine_index: int) -> str:
     return f"spine/{spine_index:04d}.jsonl"
+
+
+def sanitized_artifact_name(spine_index: int) -> str:
+    return f"sanitized/{spine_index:04d}.xhtml"
