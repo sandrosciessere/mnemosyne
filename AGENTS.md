@@ -67,6 +67,37 @@ simplify the architecture toward naive top-k RAG:
   true emergency, explicitly justified). No secrets in the repo, ever.
 - Never touch other projects' services; tests must pass before any push.
 
+## Library & ingestion invariants (do not violate)
+
+The library domain and EPUB pipeline exist (see
+`docs/architecture/epub-ingestion.md`, ADR-007/008/009). Any future work
+must respect:
+
+- `Work` ≠ `Edition` ≠ `BookAsset` — never collapse them; assets may be
+  edition-less only while ingestion is in flight.
+- Laravel owns ALL domain state. The Python worker never writes domain
+  tables and never decides state transitions; it only transforms content
+  behind `/internal/v1` (token-authenticated, data-root-relative paths).
+- Original EPUBs are immutable and content-addressed
+  (`library/original/sha256/aa/bb/{sha}.epub`); nothing ever edits or
+  deletes them. Exact dedup is by file SHA-256 — never store a second
+  copy of the same bytes.
+- A content-fingerprint match (`content_sha256`) creates a duplicate
+  CANDIDATE for admins — never an automatic destructive merge.
+- Every ingestion stage must stay idempotent and record its handler
+  version in the stage attempt; artifacts are versioned per
+  `pipeline_version` and written atomically (temp + rename).
+- Source references (spine index, source href, fragment, ordinal,
+  heading path, stable node id) must survive every future transformation
+  — chunking/retrieval that drops them breaks citation-readiness.
+- Hard security validation blocks (zip traversal, bombs, symlinks, XXE)
+  are NEVER overrideable — not by admins, not by code. DRM is never
+  bypassed.
+- Status columns are strings + PHP enums (no PG enum types); public
+  identifiers are ULIDs — never expose numeric ids in routes or APIs.
+- Test fixtures: synthetic EPUBs only. No copyrighted EPUB may ever
+  enter the repository.
+
 ## Shared server — safety rules (non-negotiable)
 
 This is a shared host (`shde-ed837.serverlet.com`) running other projects

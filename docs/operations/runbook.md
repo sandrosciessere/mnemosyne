@@ -18,6 +18,9 @@ All commands from `/srv/projects/mnemosyne` as the `mnemosyne` user.
 | Arbitrary artisan | `make artisan CMD="route:list"` |
 | Horizon status | `make artisan CMD="horizon:status"` |
 | Create first admin | `docker compose exec app php artisan mnemosyne:user:create-admin` |
+| Integration + E2E suite | `make test-integration` (then `make test-integration-down`) |
+| Filesystem discovery (dry run) | `make artisan CMD="mnemosyne:library:discover --source=<name> --dry-run"` |
+| Stale-run check (manual) | `make artisan CMD="mnemosyne:ingestion:detect-stale --dry-run"` |
 
 ## Health endpoints
 
@@ -33,6 +36,34 @@ All commands from `/srv/projects/mnemosyne` as the `mnemosyne` user.
 Dashboard at `/horizon`, restricted to authenticated admins (403
 otherwise). Queue worker runs in the `horizon` container; scheduler in the
 `scheduler` container (`schedule:work`).
+
+## EPUB ingestion operations
+
+- Queues: `ingestion-high` → `ingestion-normal` → `ingestion-low`
+  (strict priority, `supervisor-ingestion`); concurrency via
+  `MNEMOSYNE_INGESTION_CONCURRENCY` (default 2, conservative on purpose —
+  raising it needs a `.env` change + `make up`).
+- Control plane: `/admin/processing` (dashboard, runs list, run detail
+  with retry/cancel/priority/override), `/admin/submissions` (approvals),
+  `/admin/system` (auto-approval toggle, limits, pipeline versions),
+  `/admin/library` (Work → Edition → Asset navigation).
+- Scheduler now has a real healthcheck (`mnemosyne:scheduler:healthcheck`
+  driven by a heartbeat schedule) and runs
+  `mnemosyne:ingestion:detect-stale` every 5 minutes (threshold
+  `MNEMOSYNE_INGESTION_STALE_MINUTES`, default 30).
+- New `.env` keys (see `.env.example`): `MNEMOSYNE_INTERNAL_TOKEN`
+  (worker auth — generate with `openssl rand -hex 32`),
+  `MNEMOSYNE_MAX_UPLOAD_BYTES`, `MNEMOSYNE_INGESTION_CONCURRENCY`,
+  `MNEMOSYNE_IMPORT_SOURCES` (allowlist for `mnemosyne:library:discover`),
+  worker limits `WORKER_MAX_*`.
+- Upload size: the application limit (`MNEMOSYNE_MAX_UPLOAD_BYTES`,
+  default 150 MB) must stay ≤ PHP `upload_max_filesize`/`post_max_size`
+  and nginx `client_max_body_size` — the container images already ship
+  1G for all three. The HOST nginx vhost must also allow the size; if
+  large uploads fail with 413, the administrator needs to raise
+  `client_max_body_size` there (root action).
+- Data safety: never touch `library/original` by hand; artifacts under
+  `library/extracted` are regenerable; incoming files are quarantine.
 
 ## Deploy after a code change
 
