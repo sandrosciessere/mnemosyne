@@ -20,7 +20,7 @@ class AdminSubmissionApiController extends Controller
                 fn ($query) => $query->where('status', $request->string('status')->toString()),
             )
             ->orderByDesc('id')
-            ->cursorPaginate(min((int) $request->integer('per_page', 25), 100));
+            ->cursorPaginate(max(1, min((int) $request->integer('per_page', 25), 100)));
 
         return BookSubmissionResource::collection($submissions);
     }

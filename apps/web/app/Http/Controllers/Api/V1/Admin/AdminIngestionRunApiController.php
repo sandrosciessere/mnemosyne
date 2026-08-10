@@ -25,7 +25,7 @@ class AdminIngestionRunApiController extends Controller
             ->when($request->filled('stage'), fn ($query) => $query->where('current_stage', $request->string('stage')->toString()))
             ->when($request->filled('priority'), fn ($query) => $query->where('priority', $request->string('priority')->toString()))
             ->orderByDesc('id')
-            ->cursorPaginate(min((int) $request->integer('per_page', 25), 100));
+            ->cursorPaginate(max(1, min((int) $request->integer('per_page', 25), 100)));
 
         return IngestionRunResource::collection($runs);
     }

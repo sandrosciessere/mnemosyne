@@ -20,7 +20,7 @@ class SubmissionApiController extends Controller
             ->where('user_id', $request->user()->id)
             ->with(['latestRun', 'asset'])
             ->orderByDesc('id')
-            ->cursorPaginate(min((int) $request->integer('per_page', 25), 100));
+            ->cursorPaginate(max(1, min((int) $request->integer('per_page', 25), 100)));
 
         return BookSubmissionResource::collection($submissions);
     }

@@ -56,6 +56,18 @@ class SubmissionApiTest extends TestCase
         $this->assertArrayHasKey('next_cursor', $list->json('meta'));
     }
 
+    public function test_negative_per_page_cannot_disable_the_row_limit(): void
+    {
+        $user = User::factory()->create();
+        BookSubmission::factory()->count(5)->create(['user_id' => $user->id]);
+
+        // A negative per_page must never bypass the limit into an unbounded
+        // full-table load; the clamp floors it to a positive page size.
+        $list = $this->actingAs($user)->getJson('/api/v1/submissions?per_page=-1');
+        $list->assertOk();
+        $this->assertLessThanOrEqual(1, count($list->json('data')));
+    }
+
     public function test_user_cannot_read_others_submission(): void
     {
         $stranger = User::factory()->create();
