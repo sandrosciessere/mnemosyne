@@ -46,6 +46,27 @@ simplify the architecture toward naive top-k RAG:
 - Parser, normalizer, chunking, prompts, summaries, extraction and
   retrieval profiles will all be **versioned**.
 
+## Development session rules
+
+- Normal coding sessions run **as the Unix user `mnemosyne`**
+  (`sudo -iu mnemosyne` is executed by the administrator beforehand).
+  **`whoami` is the first check** — if it is not `mnemosyne`, stop.
+- **Never use `sudo` during normal development.** If an operation
+  genuinely needs root (host nginx/Certbot, firewall, host systemd,
+  Debian packages, Docker daemon config, ownership outside the Mnemosyne
+  areas), stop and give the administrator the exact command instead.
+- Run **`make preflight`** at the start of every significant session; it
+  must end with `READY FOR DEVELOPMENT`.
+- Check `git status` before modifying anything; investigate an unexpected
+  dirty tree instead of building on top of it.
+- Significant domain work happens on **feature branches**
+  (`feat/…`, `fix/…`, `refactor/…`, `chore/…`) — never directly on
+  `main`. `main` stays buildable, deployable and tested; merges are
+  fast-forward with green tests/lint/build.
+- **No force push. No destructive resets** (`git reset --hard` only in a
+  true emergency, explicitly justified). No secrets in the repo, ever.
+- Never touch other projects' services; tests must pass before any push.
+
 ## Shared server — safety rules (non-negotiable)
 
 This is a shared host (`shde-ed837.serverlet.com`) running other projects
@@ -58,29 +79,30 @@ Mnemosyne web ingress binds to loopback only (default `127.0.0.1:8100`).
 
 ## Ownership & secrets
 
-- All repository files are owned by `mnemosyne:mnemosyne`. Run Git and
-  file operations as the `mnemosyne` Unix user (`sudo -u mnemosyne -H …`).
+- Repository files are owned by `mnemosyne:mnemosyne`; you normally *are*
+  `mnemosyne`, so plain `git`/file commands are correct.
 - Secrets live only in the untracked root `.env` (mode 0600). **Never
   commit** secrets, tokens, `.env`, EPUB files, model weights or database
-  dumps. Check `git diff --cached` before every commit.
+  dumps. Check the staged diff before every commit.
 - The GitHub remote is HTTPS with a stored fine-grained PAT (user
   `mnemosyne` only). Do not change the remote, do not print credentials.
 
 ## Day-to-day commands
 
 ```bash
-make build / up / down / ps / logs   # stack lifecycle (compose project: mnemosyne)
+make preflight                        # fast read-only session preflight
+make build / up / down / ps / logs    # stack lifecycle (compose project: mnemosyne)
 make migrate                          # explicit migrations (never automatic)
 make test                             # PHP (host, sqlite) + Python (container)
-make lint                             # pint, eslint/prettier, ruff
+make lint                             # CHECK-ONLY: pint --test, eslint, prettier --check, ruff check
+make lint-ts-fix / make format-php    # explicit autofix commands
 make health                           # smoke-check the three health endpoints
 ```
 
 Migrations run **explicitly** (`make migrate`), never automatically at
 container start. PHP tests run on the host checkout; the runtime image has
-no dev dependencies. Frontend must always build (`npm run build`) before
-`vendor/bin/pint --test`, `npm run lint`, and the test suite are green —
-all of them are required before any push.
+no dev dependencies. `make lint` never modifies files — before any push,
+lint, tests and `npm run build` (in `apps/web`) must all be green.
 
 ## Data
 
@@ -95,3 +117,20 @@ Small coherent commits, imperative subject (`feat: …`, `chore: …`,
 `docs: …`). Push only when tests and lint pass. Never force-push, never
 rewrite published history. Do not add GitHub Actions workflows (the deploy
 PAT intentionally has no Workflows permission).
+
+## Agent start checklist
+
+```text
+Before coding:
+
+1. whoami -> mnemosyne
+2. make preflight
+3. git status
+4. read task + relevant ADR/docs
+5. create/use feature branch
+6. code
+7. make lint
+8. make test
+9. review diff
+10. commit/push
+```
