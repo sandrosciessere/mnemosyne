@@ -2,8 +2,15 @@
 
 namespace Tests\Integration;
 
+use App\Models\BookAsset;
+use App\Models\BookSubmission;
+use App\Models\User;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Storage;
+use Tests\Support\SyntheticEpub;
 use Tests\TestCase;
 
 /**
@@ -84,6 +91,76 @@ abstract class IntegrationTestCase extends TestCase
         }
 
         parent::tearDown();
+    }
+
+    /** Skip (or fail under RUN_INTEGRATION=1) when the real worker is down. */
+    protected function requireRealWorker(): void
+    {
+        Storage::forgetDisk('data');
+
+        try {
+            $response = Http::timeout(3)
+                ->get(config('mnemosyne.worker.base_url').'/health/live');
+            if (! $response->ok()) {
+                throw new \RuntimeException('worker live check failed');
+            }
+        } catch (\Throwable $exception) {
+            if (getenv('RUN_INTEGRATION') === '1') {
+                $this->fail('ai-worker-test is not reachable: '.$exception->getMessage());
+            }
+
+            $this->markTestSkipped('ai-worker-test is not reachable.');
+        }
+    }
+
+    /**
+     * Build a synthetic EPUB fixture, submit it through the real HTTP
+     * routes, approve it and drain the queue against the REAL worker.
+     */
+    protected function submitFixture(string $builderMethod, ?User $user = null): BookSubmission
+    {
+        $user = $user ?? User::factory()->create();
+        $admin = User::factory()->admin()->create();
+
+        $epubPath = sys_get_temp_dir().'/mnemosyne-fixture-'.uniqid().'.epub';
+        SyntheticEpub::{$builderMethod}($epubPath);
+
+        try {
+            $this->actingAs($user)->post('/library/submissions', [
+                'epub' => new UploadedFile($epubPath, $builderMethod.'.epub', 'application/epub+zip', null, true),
+            ])->assertRedirect();
+        } finally {
+            File::delete($epubPath);
+        }
+
+        $submission = BookSubmission::query()->where('user_id', $user->id)->latest('id')->first();
+        $this->actingAs($admin)->post('/admin/submissions/'.$submission->public_id.'/approve')->assertRedirect();
+        $this->drainIngestionQueue();
+
+        return $submission->refresh();
+    }
+
+    /** Absolute artifact dir for an asset at the current pipeline version. */
+    protected function artifactDir(BookAsset $asset): string
+    {
+        return $this->testDataRoot.'/library/extracted/'.$asset->public_id.'/v1';
+    }
+
+    /** @return list<array<string, mixed>> all spine JSONL nodes in order */
+    protected function readAllNodes(BookAsset $asset): array
+    {
+        $nodes = [];
+        foreach (glob($this->artifactDir($asset).'/spine/*.jsonl') as $file) {
+            foreach (explode("\n", trim((string) file_get_contents($file))) as $line) {
+                if ($line !== '') {
+                    $nodes[] = json_decode($line, true);
+                }
+            }
+        }
+
+        usort($nodes, fn ($a, $b) => $a['ordinal'] <=> $b['ordinal']);
+
+        return $nodes;
     }
 
     /** Process queued ingestion jobs until the database queue drains. */
