@@ -111,6 +111,10 @@ services:
     restart: unless-stopped
     command: ["php", "artisan", "horizon"]
     stop_grace_period: 60s
+    # Queue jobs write to /data: they must run as the host `mnemosyne`
+    # uid/gid (1003), never root — the ai-worker (uid 1003) has to read
+    # every file they produce.
+    user: "1003:1003"
     env_file: .env
     volumes:
       - ${MNEMOSYNE_DATA_ROOT:-/srv/data/mnemosyne}:/data
@@ -139,6 +143,7 @@ services:
     image: mnemosyne-app:bootstrap
     restart: unless-stopped
     command: ["php", "artisan", "schedule:work"]
+    user: "1003:1003"
     env_file: .env
     volumes:
       - ${MNEMOSYNE_DATA_ROOT:-/srv/data/mnemosyne}:/data
@@ -149,6 +154,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "php artisan mnemosyne:scheduler:healthcheck"]
+      interval: 60s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
     deploy:
       resources:
         limits:
@@ -182,6 +193,58 @@ services:
         limits:
           cpus: "4"
           memory: 6g
+
+  # ------------------------------------------------------------------
+  # Test-only services (compose profile "test", started by
+  # `make test-integration`). Loopback-only, ephemeral storage, fixed
+  # non-secret test credentials. They never join the production pipeline:
+  # host-side PHPUnit integration/E2E suites talk to them directly.
+  # ------------------------------------------------------------------
+  pg-test:
+    profiles: ["test"]
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: mnemosyne_test
+      POSTGRES_USER: mnemosyne_test
+      POSTGRES_PASSWORD: mnemosyne_test_only
+    ports:
+      - "127.0.0.1:${MNEMOSYNE_TEST_PG_PORT:-8109}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mnemosyne_test -d mnemosyne_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
+
+  ai-worker-test:
+    profiles: ["test"]
+    build:
+      context: services/ai-worker
+    image: mnemosyne-ai-worker:bootstrap
+    environment:
+      WORKER_DATA_PATH: /data
+      WORKER_READINESS_CHECKS: storage
+      MNEMOSYNE_INTERNAL_TOKEN: mnemosyne-test-token
+    ports:
+      - "127.0.0.1:${MNEMOSYNE_TEST_WORKER_PORT:-8108}:8000"
+    volumes:
+      - ${MNEMOSYNE_TEST_DATA_ROOT:-/srv/data/mnemosyne/tmp/e2e-data}:/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 2g
 
 networks:
   edge:

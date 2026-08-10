@@ -2,6 +2,7 @@ COMPOSE = docker compose
 PORT ?= 8100
 
 .PHONY: help preflight build up down restart ps logs test test-php test-python \
+	test-integration test-integration-down \
 	lint lint-php lint-ts lint-python lint-ts-fix format-php health \
 	shell worker-shell artisan migrate
 
@@ -15,6 +16,8 @@ help:
 	@echo "  make ps            stack status"
 	@echo "  make logs          follow logs"
 	@echo "  make test          PHP + Python test suites"
+	@echo "  make test-integration       PostgreSQL + real-worker E2E suite (compose profile test)"
+	@echo "  make test-integration-down  stop the test-profile containers"
 	@echo "  make lint          check-only lint (pint, eslint, prettier, ruff)"
 	@echo "  make lint-ts-fix   autofix TS (eslint --fix + prettier --write)"
 	@echo "  make format-php    autofix PHP style (pint)"
@@ -56,6 +59,30 @@ test-python:
 
 test: test-php test-python
 
+# Integration + true E2E: ephemeral PostgreSQL (pg-test, tmpfs) and the
+# REAL Python worker (ai-worker-test), both loopback-only via the compose
+# "test" profile. The suite hard-refuses any database not ending in
+# `_test` and uses a disposable data root under /srv/data/mnemosyne/tmp.
+test-integration:
+	mkdir -p /srv/data/mnemosyne/tmp/e2e-data
+	$(COMPOSE) --profile test build ai-worker-test
+	$(COMPOSE) --profile test up -d --wait pg-test ai-worker-test
+	cd apps/web && \
+		RUN_INTEGRATION=1 \
+		DB_CONNECTION=pgsql \
+		DB_HOST=127.0.0.1 \
+		DB_PORT=8109 \
+		DB_DATABASE=mnemosyne_test \
+		DB_USERNAME=mnemosyne_test \
+		DB_PASSWORD=mnemosyne_test_only \
+		MNEMOSYNE_TEST_DATA_ROOT=/srv/data/mnemosyne/tmp/e2e-data \
+		MNEMOSYNE_TEST_WORKER_PORT=8108 \
+		php artisan test --testsuite=Integration
+
+test-integration-down:
+	$(COMPOSE) --profile test stop pg-test ai-worker-test
+	$(COMPOSE) --profile test rm -f pg-test ai-worker-test
+
 # ---- lint = check-only; autofix commands are explicit and separate ----
 
 lint-php:
@@ -88,8 +115,10 @@ worker-shell:
 	$(COMPOSE) exec ai-worker bash
 
 # Usage: make artisan CMD="route:list"
+# Always as the mnemosyne user: root-created files under /data would be
+# unreadable by the worker (uid 1003).
 artisan:
-	$(COMPOSE) exec app php artisan $(CMD)
+	$(COMPOSE) exec --user mnemosyne app php artisan $(CMD)
 
 migrate:
-	$(COMPOSE) exec app php artisan migrate --force
+	$(COMPOSE) exec --user mnemosyne app php artisan migrate --force

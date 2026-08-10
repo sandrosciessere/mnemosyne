@@ -210,6 +210,23 @@ return [
             'timeout' => 60,
             'nice' => 0,
         ],
+
+        // EPUB ingestion pipeline. Queue order IS the priority order:
+        // Horizon drains ingestion-high before ingestion-normal before
+        // ingestion-low. Process count stays conservative on purpose —
+        // this is a shared host (see docs/operations/environment.md).
+        'supervisor-ingestion' => [
+            'connection' => 'redis',
+            'queue' => ['ingestion-high', 'ingestion-normal', 'ingestion-low'],
+            'balance' => 'off',
+            'maxProcesses' => (int) env('MNEMOSYNE_INGESTION_CONCURRENCY', 2),
+            'maxTime' => 0,
+            'maxJobs' => 0,
+            'memory' => 256,
+            'tries' => 1,
+            'timeout' => 600,
+            'nice' => 5,
+        ],
     ],
 
     'environments' => [
