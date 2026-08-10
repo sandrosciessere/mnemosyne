@@ -1,6 +1,6 @@
 import { cn } from '@/lib/utils';
 import { type IngestionStage } from '@/types/library';
-import { AlertTriangle, Check, Circle, LoaderCircle, X } from 'lucide-react';
+import { AlertTriangle, Check, Circle, LoaderCircle, Pause, X } from 'lucide-react';
 
 export const INGESTION_STAGES: IngestionStage[] = ['hash', 'validate', 'parse', 'normalize', 'structure'];
 
@@ -19,7 +19,7 @@ export function stageLabel(stage: string | null | undefined): string {
     return STAGE_LABELS[stage as IngestionStage] ?? stage;
 }
 
-type StageState = 'pending' | 'in_progress' | 'done' | 'failed' | 'needs_review';
+type StageState = 'pending' | 'in_progress' | 'done' | 'failed' | 'needs_review' | 'paused';
 
 const STATE_TEXT: Record<StageState, string> = {
     pending: 'Pending',
@@ -27,10 +27,11 @@ const STATE_TEXT: Record<StageState, string> = {
     done: 'Done',
     failed: 'Failed',
     needs_review: 'Needs review',
+    paused: 'Paused',
 };
 
 function stageState(stage: IngestionStage, currentStage: string | null | undefined, status: string): StageState {
-    if (status === 'succeeded' || status === 'completed' || status === 'ready_for_enrichment') {
+    if (status === 'succeeded' || status === 'completed' || status === 'ready_for_enrichment' || status === 'ready_for_enrichment_with_warnings') {
         return 'done';
     }
     const currentIndex = currentStage ? INGESTION_STAGES.indexOf(currentStage as IngestionStage) : -1;
@@ -50,7 +51,10 @@ function stageState(stage: IngestionStage, currentStage: string | null | undefin
     if (status === 'needs_review') {
         return 'needs_review';
     }
-    if (status === 'queued' || status === 'cancelled') {
+    if (status === 'paused') {
+        return 'paused';
+    }
+    if (status === 'queued' || status === 'cancelled' || status === 'skipped') {
         return 'pending';
     }
     return 'in_progress';
@@ -67,6 +71,8 @@ function StageIcon({ state }: { state: StageState }) {
             return <AlertTriangle className={className} aria-hidden="true" />;
         case 'in_progress':
             return <LoaderCircle className={cn(className, 'animate-spin')} aria-hidden="true" />;
+        case 'paused':
+            return <Pause className={className} aria-hidden="true" />;
         default:
             return <Circle className={className} aria-hidden="true" />;
     }
@@ -91,7 +97,7 @@ export function StageStepper({ currentStage, status, className }: StageStepperPr
                             'flex items-center gap-2 rounded-md border p-2 sm:flex-col sm:items-start',
                             state === 'in_progress' && 'border-primary',
                             state === 'failed' && 'border-destructive',
-                            (state === 'pending' || state === 'done') && 'border-sidebar-border/70 dark:border-sidebar-border',
+                            (state === 'pending' || state === 'done' || state === 'paused') && 'border-sidebar-border/70 dark:border-sidebar-border',
                         )}
                     >
                         <span

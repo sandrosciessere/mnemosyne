@@ -18,15 +18,24 @@ export type SubmissionStatus =
     | 'approved'
     | 'queued'
     | 'processing'
+    | 'paused'
     | 'needs_review'
     | 'failed'
     | 'completed'
     | 'rejected'
-    | 'cancelled';
+    | 'cancelled'
+    | 'unsupported';
 
-export type RunStatus = 'queued' | 'running' | 'needs_review' | 'failed' | 'succeeded' | 'cancelled';
+export type RunStatus = 'queued' | 'running' | 'paused' | 'needs_review' | 'failed' | 'succeeded' | 'cancelled' | 'skipped';
 
-export type AssetIngestionStatus = 'pending' | 'processing' | 'needs_review' | 'failed' | 'ready_for_enrichment';
+export type AssetIngestionStatus =
+    | 'pending'
+    | 'processing'
+    | 'needs_review'
+    | 'failed'
+    | 'ready_for_enrichment'
+    | 'ready_for_enrichment_with_warnings'
+    | 'unsupported';
 
 export type IngestionStage = 'hash' | 'validate' | 'parse' | 'normalize' | 'structure';
 

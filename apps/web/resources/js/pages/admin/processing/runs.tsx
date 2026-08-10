@@ -20,7 +20,7 @@ const breadcrumbs: BreadcrumbItem[] = [
     { title: 'Runs', href: '/admin/processing/runs' },
 ];
 
-const RUN_STATUSES: RunStatus[] = ['queued', 'running', 'needs_review', 'failed', 'succeeded', 'cancelled'];
+const RUN_STATUSES: RunStatus[] = ['queued', 'running', 'paused', 'needs_review', 'failed', 'succeeded', 'cancelled', 'skipped'];
 const PRIORITIES: IngestionPriority[] = ['high', 'normal', 'low'];
 const ACTIVE_RUN_STATUSES: RunStatus[] = ['queued', 'running'];
 

@@ -13,9 +13,10 @@ interface IngestionProgressProps {
  * claim anything about analysis/enrichment, which happen later.
  */
 export function IngestionProgress({ progress, status, className }: IngestionProgressProps) {
-    const ready = status === 'completed' || status === 'ready_for_enrichment' || status === 'succeeded';
+    const readyWithWarnings = status === 'ready_for_enrichment_with_warnings';
+    const ready = status === 'completed' || status === 'ready_for_enrichment' || status === 'succeeded' || readyWithWarnings;
     const value = ready ? 100 : Math.max(0, Math.min(100, Math.round(progress ?? 0)));
-    const label = ready ? 'Ready for enrichment' : 'Ingestion progress';
+    const label = readyWithWarnings ? 'Ready for enrichment (with warnings)' : ready ? 'Ready for enrichment' : 'Ingestion progress';
 
     return (
         <div className={cn('w-full', className)}>

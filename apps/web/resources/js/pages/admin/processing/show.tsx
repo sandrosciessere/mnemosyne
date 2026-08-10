@@ -118,8 +118,10 @@ interface ShowProps {
 }
 
 const ACTIVE_STATUSES: RunStatus[] = ['queued', 'running'];
-const CANCELLABLE: RunStatus[] = ['queued', 'running', 'needs_review'];
+const CANCELLABLE: RunStatus[] = ['queued', 'running', 'needs_review', 'paused'];
 const RETRYABLE: RunStatus[] = ['failed', 'needs_review'];
+const PAUSABLE: RunStatus[] = ['queued', 'running'];
+const MARKABLE_UNSUPPORTED: RunStatus[] = ['failed', 'needs_review', 'paused'];
 
 function truncateHash(hash: string | null): string {
     if (!hash) {
@@ -140,6 +142,9 @@ function severityVariant(severity: string | undefined): 'destructive' | 'seconda
 
 export default function RunShow({ run, submission, asset, attempts, events, duplicates }: ShowProps) {
     const [cancelOpen, setCancelOpen] = useState(false);
+    const [pauseOpen, setPauseOpen] = useState(false);
+    const [unsupportedOpen, setUnsupportedOpen] = useState(false);
+    const [unsupportedReason, setUnsupportedReason] = useState('');
 
     const breadcrumbs: BreadcrumbItem[] = [
         { title: 'Processing', href: '/admin/processing' },
@@ -157,6 +162,25 @@ export default function RunShow({ run, submission, asset, attempts, events, dupl
 
     const cancel = () => {
         router.post(`${baseUrl}/cancel`, {}, { preserveScroll: true, onFinish: () => setCancelOpen(false) });
+    };
+
+    const pause = () => {
+        router.post(`${baseUrl}/pause`, {}, { preserveScroll: true, onFinish: () => setPauseOpen(false) });
+    };
+
+    const resume = () => {
+        router.post(`${baseUrl}/resume`, {}, { preserveScroll: true });
+    };
+
+    const markUnsupported = () => {
+        const reason = unsupportedReason.trim();
+        router.post(`${baseUrl}/mark-unsupported`, reason ? { reason } : {}, {
+            preserveScroll: true,
+            onFinish: () => {
+                setUnsupportedOpen(false);
+                setUnsupportedReason('');
+            },
+        });
     };
 
     const setPriority = (priority: string) => {
@@ -204,6 +228,76 @@ export default function RunShow({ run, submission, asset, attempts, events, dupl
                             <Button variant="outline" size="sm" onClick={retry}>
                                 Retry
                             </Button>
+                        )}
+                        {PAUSABLE.includes(run.status) && (
+                            <Dialog open={pauseOpen} onOpenChange={setPauseOpen}>
+                                <DialogTrigger asChild>
+                                    <Button variant="outline" size="sm">
+                                        Pause
+                                    </Button>
+                                </DialogTrigger>
+                                <DialogContent>
+                                    <DialogHeader>
+                                        <DialogTitle>Pause this run?</DialogTitle>
+                                        <DialogDescription>The current stage finishes safely; nothing further is dispatched.</DialogDescription>
+                                    </DialogHeader>
+                                    <DialogFooter>
+                                        <DialogClose asChild>
+                                            <Button variant="ghost">Keep running</Button>
+                                        </DialogClose>
+                                        <Button onClick={pause}>Pause run</Button>
+                                    </DialogFooter>
+                                </DialogContent>
+                            </Dialog>
+                        )}
+                        {run.status === 'paused' && (
+                            <Button variant="outline" size="sm" onClick={resume}>
+                                Resume
+                            </Button>
+                        )}
+                        {MARKABLE_UNSUPPORTED.includes(run.status) && (
+                            <Dialog
+                                open={unsupportedOpen}
+                                onOpenChange={(open) => {
+                                    setUnsupportedOpen(open);
+                                    if (!open) {
+                                        setUnsupportedReason('');
+                                    }
+                                }}
+                            >
+                                <DialogTrigger asChild>
+                                    <Button variant="outline" size="sm">
+                                        Mark unsupported
+                                    </Button>
+                                </DialogTrigger>
+                                <DialogContent>
+                                    <DialogHeader>
+                                        <DialogTitle>Mark this book as unsupported?</DialogTitle>
+                                        <DialogDescription>
+                                            Terminal: marks the book unsupported. A corrected file can be submitted later as a new submission.
+                                        </DialogDescription>
+                                    </DialogHeader>
+                                    <div className="grid gap-1.5">
+                                        <Label htmlFor="unsupported-reason">Reason (optional)</Label>
+                                        <textarea
+                                            id="unsupported-reason"
+                                            value={unsupportedReason}
+                                            onChange={(e) => setUnsupportedReason(e.target.value)}
+                                            rows={3}
+                                            placeholder="e.g. DRM-protected file, malformed beyond repair…"
+                                            className="border-input bg-background ring-offset-background placeholder:text-muted-foreground focus-visible:ring-ring flex w-full rounded-md border px-3 py-2 text-base focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:outline-hidden md:text-sm"
+                                        />
+                                    </div>
+                                    <DialogFooter>
+                                        <DialogClose asChild>
+                                            <Button variant="ghost">Keep as is</Button>
+                                        </DialogClose>
+                                        <Button variant="destructive" onClick={markUnsupported}>
+                                            Mark unsupported
+                                        </Button>
+                                    </DialogFooter>
+                                </DialogContent>
+                            </Dialog>
                         )}
                         {CANCELLABLE.includes(run.status) && (
                             <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>

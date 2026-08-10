@@ -1,12 +1,25 @@
-import { formatDate, formatDurationSeconds, formatRelative } from '@/components/library/format';
+import { formatDate, formatDuration, formatDurationSeconds, formatRelative } from '@/components/library/format';
 import { stageLabel } from '@/components/library/stage-stepper';
 import { StatusBadge } from '@/components/library/status-badge';
 import { usePoll } from '@/components/library/use-poll';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+    Dialog,
+    DialogClose,
+    DialogContent,
+    DialogDescription,
+    DialogFooter,
+    DialogHeader,
+    DialogTitle,
+    DialogTrigger,
+} from '@/components/ui/dialog';
 import AppLayout from '@/layouts/app-layout';
 import { type BreadcrumbItem } from '@/types';
-import { Head, Link } from '@inertiajs/react';
+import { Head, Link, router } from '@inertiajs/react';
+import { Pause } from 'lucide-react';
+import { useState } from 'react';
 
 const breadcrumbs: BreadcrumbItem[] = [
     {
@@ -45,6 +58,24 @@ interface ProcessingProps {
         duration_seconds: number | null;
         finished_at: string | null;
     }[];
+    ingestion_paused: boolean;
+    observability: {
+        retries_last_day: number;
+        failed_last_day: number;
+        error_rate_last_day: number | null;
+        completed_last_hour: number;
+        stale_running: number;
+        avg_stage_duration_ms: Record<string, number> | null;
+        backlog_eta_seconds: number | null;
+    };
+}
+
+function formatErrorRate(rate: number | null): string {
+    if (rate === null || Number.isNaN(rate)) {
+        return '—';
+    }
+    // Backend already sends a percentage (e.g. 12.5).
+    return `${rate.toFixed(1)}%`;
 }
 
 function StatCard({ label, value, href }: { label: string; value: number; href: string }) {
@@ -59,11 +90,30 @@ function StatCard({ label, value, href }: { label: string; value: number; href: 
     );
 }
 
-export default function Processing({ summary, queue, stages, recent_failures, recent_completions }: ProcessingProps) {
-    usePoll(true, ['summary', 'queue', 'stages', 'recent_failures', 'recent_completions'], 15000);
+export default function Processing({
+    summary,
+    queue,
+    stages,
+    recent_failures,
+    recent_completions,
+    ingestion_paused,
+    observability,
+}: ProcessingProps) {
+    const [pauseOpen, setPauseOpen] = useState(false);
+
+    usePoll(true, ['summary', 'queue', 'stages', 'recent_failures', 'recent_completions', 'ingestion_paused', 'observability'], 15000);
 
     const stageEntries = Object.entries(stages ?? {});
     const maxStageCount = Math.max(1, ...stageEntries.map(([, count]) => count));
+    const avgStageEntries = observability.avg_stage_duration_ms ? Object.entries(observability.avg_stage_duration_ms) : [];
+
+    const pauseIngestion = () => {
+        router.post('/admin/processing/pause', {}, { preserveScroll: true, onFinish: () => setPauseOpen(false) });
+    };
+
+    const resumeIngestion = () => {
+        router.post('/admin/processing/resume', {}, { preserveScroll: true });
+    };
 
     return (
         <AppLayout breadcrumbs={breadcrumbs}>
@@ -81,8 +131,43 @@ export default function Processing({ summary, queue, stages, recent_failures, re
                         <Button asChild variant="outline">
                             <Link href="/admin/processing/runs">All runs</Link>
                         </Button>
+                        {!ingestion_paused && (
+                            <Dialog open={pauseOpen} onOpenChange={setPauseOpen}>
+                                <DialogTrigger asChild>
+                                    <Button variant="ghost">
+                                        <Pause aria-hidden="true" />
+                                        Pause ingestion
+                                    </Button>
+                                </DialogTrigger>
+                                <DialogContent>
+                                    <DialogHeader>
+                                        <DialogTitle>Pause ingestion globally?</DialogTitle>
+                                        <DialogDescription>Running stages finish safely; nothing new will start.</DialogDescription>
+                                    </DialogHeader>
+                                    <DialogFooter>
+                                        <DialogClose asChild>
+                                            <Button variant="ghost">Keep running</Button>
+                                        </DialogClose>
+                                        <Button onClick={pauseIngestion}>Pause ingestion</Button>
+                                    </DialogFooter>
+                                </DialogContent>
+                            </Dialog>
+                        )}
                     </div>
                 </div>
+
+                {ingestion_paused && (
+                    <Alert>
+                        <Pause aria-hidden="true" className="size-4" />
+                        <AlertTitle>Ingestion is paused globally — queued work will not start</AlertTitle>
+                        <AlertDescription className="flex flex-wrap items-center gap-3">
+                            <span>New and queued ingestion runs stay on hold until ingestion is resumed.</span>
+                            <Button size="sm" onClick={resumeIngestion}>
+                                Resume ingestion
+                            </Button>
+                        </AlertDescription>
+                    </Alert>
+                )}
 
                 <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
                     <StatCard label="Pending approval" value={summary.pending_approval} href="/admin/submissions?status=pending_approval" />
@@ -150,6 +235,85 @@ export default function Processing({ summary, queue, stages, recent_failures, re
                                     ))}
                                 </ul>
                             )}
+                        </CardContent>
+                    </Card>
+
+                    <Card className="lg:col-span-2">
+                        <CardHeader className="pb-3">
+                            <CardTitle className="text-base">Operations</CardTitle>
+                        </CardHeader>
+                        <CardContent className="space-y-4">
+                            <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm sm:grid-cols-3 lg:grid-cols-6">
+                                <div>
+                                    <dt className="text-muted-foreground text-xs">Retries (24h)</dt>
+                                    <dd className="font-medium tabular-nums">{observability.retries_last_day}</dd>
+                                </div>
+                                <div>
+                                    <dt className="text-muted-foreground text-xs">Failures (24h)</dt>
+                                    <dd className="font-medium tabular-nums">{observability.failed_last_day}</dd>
+                                </div>
+                                <div>
+                                    <dt className="text-muted-foreground text-xs">Error rate (24h)</dt>
+                                    <dd className="font-medium tabular-nums">{formatErrorRate(observability.error_rate_last_day)}</dd>
+                                </div>
+                                <div>
+                                    <dt className="text-muted-foreground text-xs">Completed (last hour)</dt>
+                                    <dd className="font-medium tabular-nums">{observability.completed_last_hour}</dd>
+                                </div>
+                                <div>
+                                    <dt className="text-muted-foreground text-xs">Completed (24h)</dt>
+                                    <dd className="font-medium tabular-nums">{summary.completed_last_day}</dd>
+                                </div>
+                                <div>
+                                    <dt className="text-muted-foreground text-xs">Stale running</dt>
+                                    <dd
+                                        className={
+                                            observability.stale_running > 0 ? 'text-destructive font-medium tabular-nums' : 'font-medium tabular-nums'
+                                        }
+                                    >
+                                        {observability.stale_running}
+                                        {observability.stale_running > 0 ? ' — needs attention' : ''}
+                                    </dd>
+                                </div>
+                            </dl>
+                            <div>
+                                <h3 className="text-muted-foreground mb-1 text-xs font-medium">Average stage duration</h3>
+                                {avgStageEntries.length === 0 ? (
+                                    <p className="text-muted-foreground text-sm">—</p>
+                                ) : (
+                                    <table className="w-full max-w-md text-sm">
+                                        <thead>
+                                            <tr className="border-sidebar-border/70 dark:border-sidebar-border border-b text-left">
+                                                <th scope="col" className="py-1.5 pr-3 font-medium">
+                                                    Stage
+                                                </th>
+                                                <th scope="col" className="py-1.5 font-medium">
+                                                    Average duration
+                                                </th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {avgStageEntries.map(([stage, ms]) => (
+                                                <tr
+                                                    key={stage}
+                                                    className="border-sidebar-border/70 dark:border-sidebar-border border-b last:border-b-0"
+                                                >
+                                                    <td className="py-1.5 pr-3">{stageLabel(stage)}</td>
+                                                    <td className="py-1.5 tabular-nums">{formatDuration(ms)}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                )}
+                            </div>
+                            <div>
+                                <h3 className="text-muted-foreground mb-1 text-xs font-medium">Backlog ETA</h3>
+                                <p className="text-sm">
+                                    {observability.backlog_eta_seconds === null
+                                        ? 'not enough data'
+                                        : `≈ ${formatDurationSeconds(observability.backlog_eta_seconds)} (estimated)`}
+                                </p>
+                            </div>
                         </CardContent>
                     </Card>
 
