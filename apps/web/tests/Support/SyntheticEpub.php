@@ -112,7 +112,7 @@ class SyntheticEpub
         $zip->addFromString('OEBPS/cover.png', $coverBytes);
         $zip->addFromString('OEBPS/style.css', $extraCss);
 
-        $zip->close();
+        self::finalizeZip($zip);
 
         return $path;
     }
@@ -181,7 +181,7 @@ class SyntheticEpub
             </html>
             XML);
 
-        $zip->close();
+        self::finalizeZip($zip);
 
         return $path;
     }
@@ -457,7 +457,7 @@ class SyntheticEpub
             <body><nav epub:type="toc"><ol><li><a href="exists.xhtml">One</a></li></ol></nav></body></html>
             XML);
         $zip->addFromString('OEBPS/exists.xhtml', self::simpleDoc('One', 'The only chapter that exists.'));
-        $zip->close();
+        self::finalizeZip($zip);
 
         return $path;
     }
@@ -493,7 +493,7 @@ class SyntheticEpub
         $zip->addFromString('META-INF/container.xml', self::containerXml('OEBPS/content.opf'));
         $zip->addFromString('OEBPS/content.opf', '<package><metadata><dc:title>broken');
         $zip->addFromString('OEBPS/ch1.xhtml', self::simpleDoc('x', 'y'));
-        $zip->close();
+        self::finalizeZip($zip);
 
         return $path;
     }
@@ -503,7 +503,7 @@ class SyntheticEpub
         $zip = self::openZip($path);
         $zip->addFromString('META-INF/container.xml', '<container><not-closed>');
         $zip->addFromString('random.txt', 'no opf anywhere');
-        $zip->close();
+        self::finalizeZip($zip);
 
         return $path;
     }
@@ -513,7 +513,7 @@ class SyntheticEpub
         $zip = self::openZip($path);
         $zip->addFromString('META-INF/container.xml', '<?xml version="1.0"?><container/>');
         $zip->addFromString('../../evil.txt', 'escape attempt');
-        $zip->close();
+        self::finalizeZip($zip);
 
         return $path;
     }
@@ -537,7 +537,7 @@ class SyntheticEpub
               </enc:EncryptedData>
             </encryption>
             XML);
-        $zip->close();
+        self::finalizeZip($zip);
 
         return $path;
     }
@@ -618,7 +618,7 @@ class SyntheticEpub
         }
 
         $zip->addFromString('OEBPS/cover.png', self::PNG);
-        $zip->close();
+        self::finalizeZip($zip);
 
         return $path;
     }
@@ -674,5 +674,23 @@ class SyntheticEpub
         $zip->setCompressionName('mimetype', ZipArchive::CM_STORE);
 
         return $zip;
+    }
+
+    /**
+     * Fixed modification time (2024-01-01T00:00:00Z) stamped on every ZIP
+     * entry before the archive is written, so identical logical inputs
+     * produce byte-identical archives with a stable SHA-256. Without this,
+     * ZipArchive embeds the wall-clock time in each local file header and
+     * the exact-duplicate proof becomes flaky.
+     */
+    private const FIXED_MTIME = 1704067200;
+
+    private static function finalizeZip(ZipArchive $zip): void
+    {
+        for ($i = 0; $i < $zip->numFiles; $i++) {
+            $zip->setMtimeIndex($i, self::FIXED_MTIME);
+        }
+
+        $zip->close();
     }
 }
