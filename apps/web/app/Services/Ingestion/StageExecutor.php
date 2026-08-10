@@ -243,6 +243,10 @@ class StageExecutor
                     'stage' => $stage->value,
                     'code' => $warning['code'],
                     'message' => $warning['message'],
+                    // Bounded context (affected hrefs, uris, counts…) so the
+                    // admin warning summary can say WHAT is affected without
+                    // spelunking through worker artifacts.
+                    'details' => $this->boundedDetails($warning['details'] ?? []),
                 ]);
             }
 
@@ -444,6 +448,27 @@ class StageExecutor
             'error_code' => $errorCode,
             'error_message' => $errorMessage === null ? null : mb_substr($errorMessage, 0, 1000),
         ])->save();
+    }
+
+    /** Cap warning detail payloads: max 20 items per list, 500 chars per string. */
+    private function boundedDetails(array $details): array
+    {
+        $bounded = [];
+
+        foreach (array_slice($details, 0, 10, true) as $key => $value) {
+            if (is_array($value)) {
+                $bounded[$key] = array_slice(array_map(
+                    fn ($item) => is_scalar($item) ? (is_string($item) ? mb_substr($item, 0, 500) : $item) : json_encode($item),
+                    array_values($value),
+                ), 0, 20);
+            } elseif (is_string($value)) {
+                $bounded[$key] = mb_substr($value, 0, 500);
+            } elseif (is_scalar($value) || $value === null) {
+                $bounded[$key] = $value;
+            }
+        }
+
+        return $bounded;
     }
 
     /** Keep JSON summaries bounded — no giant nested worker payloads in rows. */

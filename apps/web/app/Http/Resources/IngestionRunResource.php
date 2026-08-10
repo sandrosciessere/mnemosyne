@@ -3,6 +3,7 @@
 namespace App\Http\Resources;
 
 use App\Models\IngestionRun;
+use App\Services\Ingestion\RunPresentation;
 use Illuminate\Http\Request;
 use Illuminate\Http\Resources\Json\JsonResource;
 
@@ -38,6 +39,21 @@ class IngestionRunResource extends JsonResource
                 'content_sha256' => $this->asset->content_sha256,
                 'ingestion_status' => $this->asset->ingestion_status->value,
             ]),
+            // Derived presentation (attempt-backed, never inferred from the
+            // run status): present on detail responses where attempts are
+            // loaded, mirroring the admin UI.
+            'pipeline_stages' => $this->whenLoaded(
+                'attempts',
+                fn () => RunPresentation::pipelineStages($this->resource),
+            ),
+            'warnings_summary' => $this->whenLoaded(
+                'events',
+                fn () => RunPresentation::warningsSummary($this->resource),
+            ),
+            'duplicate' => $this->whenLoaded(
+                'submission',
+                fn () => RunPresentation::duplicateInfo($this->resource),
+            ),
             'attempts' => $this->whenLoaded('attempts', fn () => $this->attempts->map(fn ($attempt) => [
                 'stage' => $attempt->stage->value,
                 'attempt' => $attempt->attempt,

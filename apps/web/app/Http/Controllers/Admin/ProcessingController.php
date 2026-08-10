@@ -10,6 +10,7 @@ use App\Models\BookSubmission;
 use App\Models\IngestionRun;
 use App\Models\SystemSetting;
 use App\Services\Ingestion\IngestionOrchestrator;
+use App\Services\Ingestion\RunPresentation;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -293,6 +294,9 @@ class ProcessingController extends Controller
                     ])->all(),
                 ],
             ],
+            'pipeline_stages' => RunPresentation::pipelineStages($run),
+            'warnings_summary' => RunPresentation::warningsSummary($run),
+            'duplicate' => RunPresentation::duplicateInfo($run),
             'attempts' => $run->attempts->map(fn ($attempt) => [
                 'stage' => $attempt->stage->value,
                 'attempt' => $attempt->attempt,

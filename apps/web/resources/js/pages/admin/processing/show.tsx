@@ -3,9 +3,10 @@ import { formatBytes, formatDate, formatDuration, formatRelative } from '@/compo
 import { IngestionProgress } from '@/components/library/ingestion-progress';
 import { MetadataList } from '@/components/library/metadata-list';
 import { StageStepper, stageLabel } from '@/components/library/stage-stepper';
-import { StatusBadge } from '@/components/library/status-badge';
+import { StatusBadge, statusLabel } from '@/components/library/status-badge';
 import { StructureSummaryList } from '@/components/library/structure-summary';
 import { usePoll } from '@/components/library/use-poll';
+import { WarningsSummary } from '@/components/library/warnings-summary';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -27,12 +28,15 @@ import AppLayout from '@/layouts/app-layout';
 import { type BreadcrumbItem } from '@/types';
 import {
     type Contributor,
+    type DuplicateInfo,
     type IngestionPriority,
     type PipelineEvent,
+    type PipelineStageInfo,
     type Reconciliation,
     type ReviewIssue,
     type RunStatus,
     type StructureSummary,
+    type WarningSummaryItem,
 } from '@/types/library';
 import { Head, Link, router } from '@inertiajs/react';
 import { AlertTriangle, ChevronsUpDown } from 'lucide-react';
@@ -115,6 +119,9 @@ interface ShowProps {
     attempts: Attempt[];
     events: PipelineEvent[];
     duplicates: Duplicate[];
+    pipeline_stages: PipelineStageInfo[];
+    warnings_summary: WarningSummaryItem[];
+    duplicate: DuplicateInfo | null;
 }
 
 const ACTIVE_STATUSES: RunStatus[] = ['queued', 'running'];
@@ -140,7 +147,7 @@ function severityVariant(severity: string | undefined): 'destructive' | 'seconda
     return 'outline';
 }
 
-export default function RunShow({ run, submission, asset, attempts, events, duplicates }: ShowProps) {
+export default function RunShow({ run, submission, asset, attempts, events, duplicates, pipeline_stages, warnings_summary, duplicate }: ShowProps) {
     const [cancelOpen, setCancelOpen] = useState(false);
     const [pauseOpen, setPauseOpen] = useState(false);
     const [unsupportedOpen, setUnsupportedOpen] = useState(false);
@@ -152,7 +159,11 @@ export default function RunShow({ run, submission, asset, attempts, events, dupl
         { title: submission?.original_filename ?? run.public_id, href: `/admin/processing/runs/${run.public_id}` },
     ];
 
-    usePoll(ACTIVE_STATUSES.includes(run.status), ['run', 'submission', 'asset', 'attempts', 'events', 'duplicates'], 5000);
+    usePoll(
+        ACTIVE_STATUSES.includes(run.status),
+        ['run', 'submission', 'asset', 'attempts', 'events', 'duplicates', 'pipeline_stages', 'warnings_summary', 'duplicate'],
+        5000,
+    );
 
     const baseUrl = `/admin/processing/runs/${run.public_id}`;
 
@@ -332,7 +343,20 @@ export default function RunShow({ run, submission, asset, attempts, events, dupl
                         <CardTitle className="text-base">Pipeline</CardTitle>
                     </CardHeader>
                     <CardContent className="space-y-4">
-                        <StageStepper currentStage={run.stage} status={run.status} />
+                        <StageStepper currentStage={run.stage} status={run.status} stages={pipeline_stages} />
+                        {duplicate && (
+                            <div className="border-sidebar-border/70 dark:border-sidebar-border rounded-md border p-3 text-sm">
+                                <p className="font-medium">Exact duplicate — existing processed asset reused</p>
+                                <p className="text-muted-foreground mt-1 text-xs">
+                                    Only SHA verification was required; the remaining stages were reused from{' '}
+                                    <Link href={`/admin/library/assets/${duplicate.reused_asset.public_id}`} className="underline underline-offset-2">
+                                        {duplicate.reused_asset.original_filename}
+                                    </Link>{' '}
+                                    (<span className="font-mono">{duplicate.reused_asset.public_id}</span>,{' '}
+                                    {statusLabel(duplicate.reused_asset.ingestion_status)}).
+                                </p>
+                            </div>
+                        )}
                         <IngestionProgress progress={run.progress} status={run.status} />
                         <dl className="text-muted-foreground grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-4">
                             <div>
@@ -363,6 +387,8 @@ export default function RunShow({ run, submission, asset, attempts, events, dupl
                         )}
                     </CardContent>
                 </Card>
+
+                <WarningsSummary warnings={warnings_summary} />
 
                 {run.review_issues.length > 0 && (
                     <Card>

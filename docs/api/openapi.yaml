@@ -370,6 +370,51 @@ components:
               severity: { type: string, enum: [hard_block, reviewable, warning] }
               message: { type: string }
               overrideable: { type: boolean, description: "Hard security blocks are never overrideable" }
+        pipeline_stages:
+          type: array
+          description: |
+            Derived per-stage execution facts (detail responses). `reused`
+            means the stage did not run because an exact-duplicate run
+            reused the existing asset's results; `not_executed` means the
+            run ended before reaching the stage. Never inferred from the
+            run status alone.
+          items:
+            type: object
+            properties:
+              stage: { type: string, enum: [hash, validate, parse, normalize, structure] }
+              execution_status:
+                type: string
+                enum: [succeeded, failed, needs_review, running, cancelled, reused, not_executed, pending]
+              attempts: { type: integer }
+              duration_ms: { type: [integer, "null"] }
+        warnings_summary:
+          type: array
+          description: |
+            Unique warnings aggregated across stages (detail responses):
+            one entry per warning code with the stages it was seen in and
+            bounded context details (e.g. affected document hrefs). Raw
+            per-stage warning events remain in `events`.
+          items:
+            type: object
+            properties:
+              code: { type: string }
+              message: { type: string }
+              stages: { type: array, items: { type: string } }
+              occurrences: { type: integer }
+              details: { type: object }
+        duplicate:
+          type: [object, "null"]
+          description: Present when the run's submission was an exact duplicate.
+          properties:
+            reused_asset:
+              type: object
+              properties:
+                public_id: { type: string }
+                ingestion_status: { type: string }
+                original_filename: { type: string }
+            disposition:
+              type: [string, "null"]
+              enum: [ready, unsupported, failed, waiting, null]
         attempts:
           type: array
           items:

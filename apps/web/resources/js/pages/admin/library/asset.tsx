@@ -2,13 +2,14 @@ import { formatBytes, formatDate } from '@/components/library/format';
 import { MetadataList } from '@/components/library/metadata-list';
 import { StatusBadge } from '@/components/library/status-badge';
 import { StructureSummaryList } from '@/components/library/structure-summary';
+import { WarningsSummary } from '@/components/library/warnings-summary';
 import { buttonVariants } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import AppLayout from '@/layouts/app-layout';
 import { cn } from '@/lib/utils';
 import { type BreadcrumbItem } from '@/types';
-import { type Reconciliation, type StructureSummary } from '@/types/library';
+import { type Reconciliation, type StructureSummary, type WarningSummaryItem } from '@/types/library';
 import { Head, Link } from '@inertiajs/react';
 import { ChevronsUpDown, Download } from 'lucide-react';
 
@@ -63,6 +64,7 @@ interface AssetShowProps {
     submissions: AssetSubmission[];
     runs: AssetRun[];
     duplicates: AssetDuplicate[];
+    warnings_summary: WarningSummaryItem[];
 }
 
 function HashValue({ hash }: { hash: string | null | undefined }) {
@@ -76,7 +78,7 @@ function HashValue({ hash }: { hash: string | null | undefined }) {
     );
 }
 
-export default function AssetShow({ asset, submissions, runs, duplicates }: AssetShowProps) {
+export default function AssetShow({ asset, submissions, runs, duplicates, warnings_summary }: AssetShowProps) {
     const name = asset.original_filename ?? asset.public_id;
 
     const breadcrumbs: BreadcrumbItem[] = [
@@ -94,6 +96,11 @@ export default function AssetShow({ asset, submissions, runs, duplicates }: Asse
                             <div className="flex flex-wrap items-center gap-2">
                                 <CardTitle className="text-lg break-all">{name}</CardTitle>
                                 <StatusBadge status={asset.ingestion_status} />
+                                {warnings_summary.length > 0 && (
+                                    <a href="#warnings" className="text-muted-foreground text-xs underline underline-offset-2">
+                                        {warnings_summary.length === 1 ? '1 warning' : `${warnings_summary.length} warnings`} — why?
+                                    </a>
+                                )}
                             </div>
                             <a href={`/library/books/${asset.public_id}/download`} className={cn(buttonVariants({ variant: 'outline', size: 'sm' }))}>
                                 <Download aria-hidden="true" />
@@ -181,6 +188,8 @@ export default function AssetShow({ asset, submissions, runs, duplicates }: Asse
                         </Collapsible>
                     </CardContent>
                 </Card>
+
+                <WarningsSummary warnings={warnings_summary} />
 
                 <div className="grid gap-4 lg:grid-cols-2">
                     <Card>

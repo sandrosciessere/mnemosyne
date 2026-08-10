@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Library;
 use App\Http\Controllers\Controller;
 use App\Http\Requests\Library\StoreSubmissionRequest;
 use App\Models\BookSubmission;
+use App\Services\Ingestion\RunPresentation;
 use App\Services\Library\SubmissionService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -90,6 +91,7 @@ class SubmissionController extends Controller
                 'status' => $run->status->value,
                 'current_stage' => $run->current_stage?->value,
                 'progress' => $run->progress,
+                'pipeline_stages' => RunPresentation::pipelineStages($run),
                 'started_at' => $run->started_at?->toIso8601String(),
                 'finished_at' => $run->finished_at?->toIso8601String(),
                 'error_code' => $run->last_error_code,

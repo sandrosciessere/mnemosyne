@@ -21,7 +21,14 @@ import {
 import AppLayout from '@/layouts/app-layout';
 import { cn } from '@/lib/utils';
 import { type BreadcrumbItem } from '@/types';
-import { type Contributor, type PipelineEvent, type RunStatus, type StructureSummary, type SubmissionStatus } from '@/types/library';
+import {
+    type Contributor,
+    type PipelineEvent,
+    type PipelineStageInfo,
+    type RunStatus,
+    type StructureSummary,
+    type SubmissionStatus,
+} from '@/types/library';
 import { Head, router } from '@inertiajs/react';
 import { AlertTriangle, Copy, Download } from 'lucide-react';
 import { useState } from 'react';
@@ -43,6 +50,7 @@ interface RunDetail {
     status: RunStatus;
     current_stage: string | null;
     progress: number | null;
+    pipeline_stages?: PipelineStageInfo[];
     started_at: string | null;
     finished_at: string | null;
     error_code: string | null;
@@ -166,7 +174,7 @@ export default function SubmissionShow({ submission, run, asset, events }: ShowP
                             </div>
                         </CardHeader>
                         <CardContent className="space-y-4">
-                            <StageStepper currentStage={run.current_stage} status={run.status} />
+                            <StageStepper currentStage={run.current_stage} status={run.status} stages={run.pipeline_stages} />
                             <IngestionProgress progress={run.progress} status={run.status} />
                             <div className="text-muted-foreground flex flex-wrap gap-x-4 gap-y-1 text-xs">
                                 <span>Started: {formatDate(run.started_at)}</span>

@@ -88,3 +88,30 @@ export interface Reconciliation {
     evidence?: unknown;
     version?: string | number | null;
 }
+
+/** Durable per-stage execution fact derived from stage attempts. */
+export interface PipelineStageInfo {
+    stage: IngestionStage;
+    execution_status: 'succeeded' | 'failed' | 'needs_review' | 'running' | 'cancelled' | 'reused' | 'not_executed' | 'pending';
+    attempts: number;
+    duration_ms: number | null;
+}
+
+/** Aggregated unique warning (one per code, across stages). */
+export interface WarningSummaryItem {
+    code: string;
+    message: string;
+    stages: string[];
+    occurrences: number;
+    details: Record<string, unknown>;
+}
+
+/** Exact-duplicate disposition of a run. */
+export interface DuplicateInfo {
+    reused_asset: {
+        public_id: string;
+        ingestion_status: string;
+        original_filename: string;
+    };
+    disposition: string | null;
+}

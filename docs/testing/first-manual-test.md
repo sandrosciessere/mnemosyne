@@ -51,8 +51,11 @@ stored privately on the server.
 
 1. Upload the *same* file again and approve it.
 2. Expected: it completes almost immediately with a "duplicate" notice;
-   no second copy is stored and no re-processing happens (run detail
-   shows only the `hash` stage). The library still shows one book.
+   no second copy is stored and no re-processing happens. The pipeline
+   view shows **Hash: Done** and the other stages as **Reused** (not
+   "Done" — they did not run), with an "Exact duplicate — existing
+   processed asset reused" note linking the original book. The library
+   still shows one book.
 
 ## Test 3 — A different/related EPUB
 
@@ -86,6 +89,12 @@ If you have a broken/DRM/odd file:
 * fixable oddities (broken navigation, missing pieces) → **Needs
   review** with an **Override** button, or completes as **Ready (with
   warnings)**;
+* for any book that ends **Ready (with warnings)**: both the book page
+  and the run page show a **Warnings** section explaining each unique
+  warning (code, plain-language message, stages, affected documents) —
+  the same warning reported by several stages appears once, with an
+  occurrence count. You should never need the raw event timeline to
+  understand why a book has warnings;
 * for a hopeless file, **Mark unsupported** archives it; uploading a
   corrected file later is a brand-new submission.
 

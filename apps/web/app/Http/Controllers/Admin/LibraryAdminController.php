@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Admin;
 use App\Http\Controllers\Controller;
 use App\Models\BookAsset;
 use App\Models\Work;
+use App\Services\Ingestion\RunPresentation;
 use Illuminate\Http\Request;
 use Inertia\Inertia;
 use Inertia\Response;
@@ -100,6 +101,7 @@ class LibraryAdminController extends Controller
         ]);
 
         return Inertia::render('admin/library/asset', [
+            'warnings_summary' => RunPresentation::warningsForAsset($asset),
             'asset' => [
                 'public_id' => $asset->public_id,
                 'original_filename' => $asset->original_filename,

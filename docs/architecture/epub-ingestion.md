@@ -366,6 +366,25 @@ is versioned and reversible.
   auto-retried. Whatever still slips through a hard crash is swept by
   `mnemosyne:ingestion:cleanup` (see runbook).
 
+## Derived presentation (admin/user UX)
+
+Two read-only view models (`RunPresentation`) sit between the durable
+records and the UI — domain state is never distorted for presentation:
+
+- **Pipeline stages**: per-stage `execution_status` derived from stage
+  attempts + run disposition. *Stage execution* (an attempt exists) is
+  visually distinct from *stage result reused from an existing exact
+  asset* (`reused`, no attempt — the exact-duplicate short-circuit) and
+  from `not_executed` (the run ended earlier). "Run succeeded" is never
+  inflated into "every stage ran".
+- **Warnings**: *raw warning events* stay append-only, one per stage
+  occurrence (forensics); the *aggregated warning issues* view groups
+  them by code — stages seen, occurrence count, bounded context details
+  (affected hrefs/uris) now persisted in the event payload — so the same
+  `FONT_OBFUSCATION` propagated through four stages reads as ONE issue.
+  Asset pages show the summary of the run that produced the current
+  artifacts; `Ready (with warnings)` links straight to it.
+
 ## Idempotency audit (per stage)
 
 | Stage | Durable input | Durable output | Idempotency strategy | Retry class |
