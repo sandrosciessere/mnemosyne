@@ -1,17 +1,20 @@
-"""Mnemosyne AI worker — bootstrap skeleton.
+"""Mnemosyne AI worker.
 
-Document processing, embeddings and analysis pipelines will live here in
-future sessions. For now the service only exposes liveness/readiness
-endpoints so the container can participate in stack health from day one.
+Exposes liveness/readiness endpoints plus the internal versioned EPUB
+processing API (/internal/v1/epub/*, token-protected). Interactive API
+docs stay disabled.
 """
 
 import os
 
 from fastapi import FastAPI, Response
 
+from app.routers.internal_v1 import router as internal_v1_router
+
 SERVICE_NAME = "mnemosyne-ai-worker"
 
 app = FastAPI(title=SERVICE_NAME, docs_url=None, redoc_url=None, openapi_url=None)
+app.include_router(internal_v1_router)
 
 
 def _enabled_checks() -> list[str]:
