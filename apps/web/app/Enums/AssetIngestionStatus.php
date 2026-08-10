@@ -14,4 +14,15 @@ enum AssetIngestionStatus: string
     case NeedsReview = 'needs_review';
     case Failed = 'failed';
     case ReadyForEnrichment = 'ready_for_enrichment';
+    // Structurally complete, but recoverable warnings were recorded: not
+    // interchangeable with a completely clean book.
+    case ReadyForEnrichmentWithWarnings = 'ready_for_enrichment_with_warnings';
+    // An administrator intentionally marked this book unsupported/skipped.
+    case Unsupported = 'unsupported';
+
+    public function isReadyForEnrichment(): bool
+    {
+        return $this === self::ReadyForEnrichment
+            || $this === self::ReadyForEnrichmentWithWarnings;
+    }
 }

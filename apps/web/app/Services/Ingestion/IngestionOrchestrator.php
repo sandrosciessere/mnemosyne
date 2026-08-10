@@ -11,6 +11,7 @@ use App\Jobs\RunIngestionStageJob;
 use App\Models\BookSubmission;
 use App\Models\IngestionEvent;
 use App\Models\IngestionRun;
+use App\Models\SystemSetting;
 use App\Models\User;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
@@ -63,9 +64,18 @@ class IngestionOrchestrator
     /**
      * Queue the job for a stage on the run's current priority queue.
      * Wrapped in afterCommit so a rolled-back transition never leaks a job.
+     *
+     * Global pause: dispatch becomes a no-op. Every caller leaves the run
+     * durably parked in `queued`, and resumeGlobally() re-dispatches all
+     * queued runs — so no work starts while ingestion is paused, and
+     * nothing is lost across restarts.
      */
     public function dispatchStage(IngestionRun $run, IngestionStage $stage, int $delaySeconds = 0): void
     {
+        if (SystemSetting::ingestionPaused()) {
+            return;
+        }
+
         $job = (new RunIngestionStageJob($run->id, $stage->value))
             ->onConnection(config('mnemosyne.ingestion.queue_connection'))
             ->onQueue($run->priority->queue())
@@ -133,11 +143,125 @@ class IngestionOrchestrator
 
             IngestionEvent::record(IngestionEventType::CancelRequested, run: $run, actor: $actor);
 
-            // A run stopped in needs_review has no queued job that could
-            // observe the flag — finalize the cancellation right here.
-            if ($run->status === IngestionRunStatus::NeedsReview) {
+            // Runs parked in needs_review or paused have no queued job
+            // that could observe the flag — finalize right here.
+            if (in_array($run->status, [IngestionRunStatus::NeedsReview, IngestionRunStatus::Paused], true)) {
                 app(RunStateMachine::class)->markCancelled($run);
             }
+        });
+    }
+
+    /**
+     * Cooperative per-run pause: a queued run pauses immediately; a run
+     * mid-stage finishes the current stage safely, then the boundary
+     * check parks it. Nothing is ever killed mid-write.
+     */
+    public function pause(IngestionRun $run, User $actor): void
+    {
+        DB::transaction(function () use ($run, $actor) {
+            $run = IngestionRun::query()->lockForUpdate()->findOrFail($run->id);
+
+            if (! in_array($run->status, [IngestionRunStatus::Queued, IngestionRunStatus::Running], true)) {
+                throw new InvalidTransitionException(
+                    'RUN_NOT_PAUSABLE',
+                    'Only queued or running runs can be paused.',
+                );
+            }
+
+            app(RunStateMachine::class)->markPaused($run, $actor);
+        });
+    }
+
+    /** Resume a paused run from its durable checkpoint. */
+    public function resume(IngestionRun $run, User $actor): void
+    {
+        DB::transaction(function () use ($run, $actor) {
+            $run = IngestionRun::query()->lockForUpdate()->findOrFail($run->id);
+
+            if ($run->status !== IngestionRunStatus::Paused) {
+                throw new InvalidTransitionException(
+                    'RUN_NOT_PAUSED',
+                    'Only paused runs can be resumed.',
+                );
+            }
+
+            $run->forceFill([
+                'status' => IngestionRunStatus::Queued,
+                'heartbeat_at' => now(),
+            ])->save();
+
+            IngestionEvent::record(IngestionEventType::RunResumed, run: $run, actor: $actor);
+
+            $this->dispatchStage($run, $this->nextDispatchStage($run));
+        });
+    }
+
+    /**
+     * The durable checkpoint: if the stage recorded at current_stage has
+     * already succeeded, the run resumes at the NEXT stage; otherwise the
+     * stage itself is (re)executed — its handlers are idempotent.
+     */
+    public function nextDispatchStage(IngestionRun $run): IngestionStage
+    {
+        $stage = $run->current_stage ?? IngestionStage::first();
+
+        $stageSucceeded = $run->attempts()
+            ->where('stage', $stage->value)
+            ->where('status', 'succeeded')
+            ->exists();
+
+        if ($stageSucceeded) {
+            return $stage->next() ?? $stage;
+        }
+
+        return $stage;
+    }
+
+    /** Global cooperative pause: persisted, audited, restart-safe. */
+    public function pauseGlobally(User $actor): void
+    {
+        SystemSetting::set(SystemSetting::INGESTION_PAUSED, true, $actor);
+
+        IngestionEvent::record(IngestionEventType::IngestionPausedGlobally, actor: $actor);
+    }
+
+    /** Lift the global pause and re-dispatch every queued run. */
+    public function resumeGlobally(User $actor): void
+    {
+        SystemSetting::set(SystemSetting::INGESTION_PAUSED, false, $actor);
+
+        IngestionEvent::record(IngestionEventType::IngestionResumedGlobally, actor: $actor);
+
+        IngestionRun::query()
+            ->where('status', IngestionRunStatus::Queued)
+            ->orderBy('id')
+            ->chunkById(200, function ($runs) {
+                foreach ($runs as $run) {
+                    $this->dispatchStage($run, $this->nextDispatchStage($run));
+                }
+            });
+    }
+
+    /** Admin decision: mark the book unsupported (skip). */
+    public function markUnsupported(IngestionRun $run, User $actor, ?string $reason = null): void
+    {
+        DB::transaction(function () use ($run, $actor, $reason) {
+            $run = IngestionRun::query()->lockForUpdate()->findOrFail($run->id);
+
+            $allowed = [
+                IngestionRunStatus::Failed,
+                IngestionRunStatus::NeedsReview,
+                IngestionRunStatus::Paused,
+            ];
+
+            if (! in_array($run->status, $allowed, true)) {
+                throw new InvalidTransitionException(
+                    'RUN_NOT_SKIPPABLE',
+                    'Only failed, needs-review or paused runs can be marked unsupported.',
+                );
+            }
+
+            app(RunStateMachine::class)->markUnsupported($run, $actor, $reason);
         });
     }
 

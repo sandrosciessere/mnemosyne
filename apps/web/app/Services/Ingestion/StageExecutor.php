@@ -10,6 +10,7 @@ use App\Exceptions\Library\WorkerUnavailableException;
 use App\Models\IngestionEvent;
 use App\Models\IngestionRun;
 use App\Models\IngestionStageAttempt;
+use App\Models\SystemSetting;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -66,11 +67,21 @@ class StageExecutor
     private function executeLocked(IngestionRun $run, IngestionStage $stage): void
     {
         if (! in_array($run->status, [IngestionRunStatus::Queued, IngestionRunStatus::Running], true)) {
-            return; // Cancelled/failed/reviewed elsewhere meanwhile.
+            return; // Cancelled/paused/failed/reviewed elsewhere meanwhile.
         }
 
         if ($run->cancel_requested) {
             $this->stateMachine->markCancelled($run);
+
+            return;
+        }
+
+        // Global cooperative pause: park the run durably in `queued` and
+        // consume the job. resumeGlobally() re-dispatches queued runs.
+        if (SystemSetting::ingestionPaused()) {
+            if ($run->status === IngestionRunStatus::Running) {
+                $run->forceFill(['status' => IngestionRunStatus::Queued, 'heartbeat_at' => now()])->save();
+            }
 
             return;
         }
@@ -213,10 +224,29 @@ class StageExecutor
             return;
         }
 
+        // Per-run pause requested while this stage was executing: the
+        // stage completed safely; the run stays parked at its durable
+        // checkpoint (current_stage + succeeded attempt) until resumed.
+        if ($run->status === IngestionRunStatus::Paused) {
+            return;
+        }
+
         $next = $stage->next();
 
         if ($next === null) {
             $this->stateMachine->markSucceeded($run);
+
+            return;
+        }
+
+        // Global pause raised while executing: park durably in `queued`
+        // (the checkpoint computation will resume at $next).
+        if (SystemSetting::ingestionPaused()) {
+            $run->forceFill(['status' => IngestionRunStatus::Queued, 'heartbeat_at' => now()])->save();
+            IngestionEvent::record(IngestionEventType::RunQueued, run: $run, payload: [
+                'reason' => 'global_pause',
+                'after_stage' => $stage->value,
+            ]);
 
             return;
         }
@@ -312,6 +342,15 @@ class StageExecutor
         ]);
 
         $this->stateMachine->heartbeat($run);
+
+        // Under global pause the retry is parked instead of scheduled;
+        // resumeGlobally() re-dispatches it (same-stage checkpoint).
+        if (SystemSetting::ingestionPaused()) {
+            $run->forceFill(['status' => IngestionRunStatus::Queued])->save();
+
+            return;
+        }
+
         $this->orchestrator->dispatchStage($run, $stage, delaySeconds: $delay);
     }
 

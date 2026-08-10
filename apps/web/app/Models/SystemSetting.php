@@ -10,6 +10,8 @@ class SystemSetting extends Model
 {
     public const SUBMISSION_AUTO_APPROVAL = 'submission_auto_approval';
 
+    public const INGESTION_PAUSED = 'ingestion_paused';
+
     protected $guarded = ['*'];
 
     protected $fillable = [];
@@ -58,5 +60,11 @@ class SystemSetting extends Model
     public static function autoApprovalEnabled(): bool
     {
         return (bool) static::get(self::SUBMISSION_AUTO_APPROVAL, false);
+    }
+
+    /** Global cooperative ingestion pause (survives restarts: persisted). */
+    public static function ingestionPaused(): bool
+    {
+        return (bool) static::get(self::INGESTION_PAUSED, false);
     }
 }

@@ -39,6 +39,16 @@ final class IngestionEventType
 
     public const RunMarkedStale = 'run.marked_stale';
 
+    public const RunPaused = 'run.paused';
+
+    public const RunResumed = 'run.resumed';
+
+    public const RunMarkedUnsupported = 'run.marked_unsupported';
+
+    public const IngestionPausedGlobally = 'ingestion.paused_globally';
+
+    public const IngestionResumedGlobally = 'ingestion.resumed_globally';
+
     public const RetryRequested = 'run.retry_requested';
 
     public const CancelRequested = 'run.cancel_requested';

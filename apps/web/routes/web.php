@@ -43,6 +43,11 @@ Route::middleware(['auth'])->group(function () {
         Route::post('processing/runs/{run}/cancel', [ProcessingController::class, 'cancel'])->name('processing.runs.cancel');
         Route::patch('processing/runs/{run}/priority', [ProcessingController::class, 'priority'])->name('processing.runs.priority');
         Route::post('processing/runs/{run}/override', [ProcessingController::class, 'override'])->name('processing.runs.override');
+        Route::post('processing/runs/{run}/pause', [ProcessingController::class, 'pause'])->name('processing.runs.pause');
+        Route::post('processing/runs/{run}/resume', [ProcessingController::class, 'resume'])->name('processing.runs.resume');
+        Route::post('processing/runs/{run}/mark-unsupported', [ProcessingController::class, 'markUnsupported'])->name('processing.runs.mark-unsupported');
+        Route::post('processing/pause', [ProcessingController::class, 'pauseGlobal'])->name('processing.pause');
+        Route::post('processing/resume', [ProcessingController::class, 'resumeGlobal'])->name('processing.resume');
 
         Route::get('submissions', [SubmissionAdminController::class, 'index'])->name('submissions');
         Route::post('submissions/{submission}/approve', [SubmissionAdminController::class, 'approve'])->name('submissions.approve');

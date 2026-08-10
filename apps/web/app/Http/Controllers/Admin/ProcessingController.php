@@ -3,10 +3,12 @@
 namespace App\Http\Controllers\Admin;
 
 use App\Enums\IngestionPriority;
+use App\Enums\IngestionStage;
 use App\Http\Controllers\Controller;
 use App\Models\BookAsset;
 use App\Models\BookSubmission;
 use App\Models\IngestionRun;
+use App\Models\SystemSetting;
 use App\Services\Ingestion\IngestionOrchestrator;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -56,7 +58,11 @@ class ProcessingController extends Controller
             ->limit(10)
             ->get();
 
+        $observability = $this->observability($runCounts);
+
         return Inertia::render('admin/processing', [
+            'ingestion_paused' => SystemSetting::ingestionPaused(),
+            'observability' => $observability,
             'summary' => [
                 'pending_approval' => BookSubmission::query()->where('status', 'pending_approval')->count(),
                 'queued' => (int) ($runCounts['queued'] ?? 0),
@@ -98,6 +104,69 @@ class ProcessingController extends Controller
                 'finished_at' => $run->finished_at?->toIso8601String(),
             ]),
         ]);
+    }
+
+    /**
+     * First-milestone ingestion observability. Real aggregates only; the
+     * backlog ETA is clearly approximate and null when there is not
+     * enough recent history to ground it.
+     */
+    private function observability($runCounts): array
+    {
+        $dayAgo = now()->subDay();
+        $staleThreshold = now()->subMinutes((int) config('mnemosyne.ingestion.stale_after_minutes'));
+
+        $stageDurations = DB::table('ingestion_stage_attempts')
+            ->select('stage', DB::raw('avg(duration_ms) as avg_ms'), DB::raw('count(*) as samples'))
+            ->where('status', 'succeeded')
+            ->where('finished_at', '>=', $dayAgo)
+            ->groupBy('stage')
+            ->get()
+            ->keyBy('stage');
+
+        $avgRunSeconds = null;
+        if ($stageDurations->count() === count(IngestionStage::ordered())) {
+            $avgRunSeconds = (int) ceil($stageDurations->sum('avg_ms') / 1000);
+        }
+
+        $queuedCount = (int) ($runCounts['queued'] ?? 0);
+        $concurrency = max(1, (int) config('mnemosyne.ingestion.concurrency'));
+
+        $finishedLastDay = IngestionRun::query()
+            ->whereIn('status', ['succeeded', 'failed'])
+            ->where('finished_at', '>=', $dayAgo)
+            ->count();
+        $failedLastDay = IngestionRun::query()
+            ->where('status', 'failed')
+            ->where('finished_at', '>=', $dayAgo)
+            ->count();
+
+        return [
+            'retries_last_day' => DB::table('ingestion_stage_attempts')
+                ->where('attempt', '>', 1)
+                ->where('started_at', '>=', $dayAgo)
+                ->count(),
+            'failed_last_day' => $failedLastDay,
+            'error_rate_last_day' => $finishedLastDay > 0
+                ? round($failedLastDay * 100 / $finishedLastDay, 1)
+                : null,
+            'completed_last_hour' => IngestionRun::query()
+                ->where('status', 'succeeded')
+                ->where('finished_at', '>=', now()->subHour())
+                ->count(),
+            'stale_running' => IngestionRun::query()
+                ->where('status', 'running')
+                ->where('heartbeat_at', '<', $staleThreshold)
+                ->count(),
+            'avg_stage_duration_ms' => $stageDurations
+                ->map(fn ($row) => (int) $row->avg_ms)
+                ->all() ?: null,
+            // Estimated: queued runs × average recent run duration over the
+            // configured concurrency. Null without a full day of samples.
+            'backlog_eta_seconds' => ($avgRunSeconds !== null && $queuedCount > 0)
+                ? (int) ceil($queuedCount * $avgRunSeconds / $concurrency)
+                : null,
+        ];
     }
 
     public function runs(Request $request): Response
@@ -279,5 +348,44 @@ class ProcessingController extends Controller
         $orchestrator->overrideIssue($run, $validated['code'], $request->user());
 
         return back()->with('success', 'Issue overridden; run resumed.');
+    }
+
+    public function pause(Request $request, IngestionRun $run, IngestionOrchestrator $orchestrator): RedirectResponse
+    {
+        $orchestrator->pause($run, $request->user());
+
+        return back()->with('success', 'Run paused; the current stage finishes safely.');
+    }
+
+    public function resume(Request $request, IngestionRun $run, IngestionOrchestrator $orchestrator): RedirectResponse
+    {
+        $orchestrator->resume($run, $request->user());
+
+        return back()->with('success', 'Run resumed from its checkpoint.');
+    }
+
+    public function markUnsupported(Request $request, IngestionRun $run, IngestionOrchestrator $orchestrator): RedirectResponse
+    {
+        $validated = $request->validate([
+            'reason' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        $orchestrator->markUnsupported($run, $request->user(), $validated['reason'] ?? null);
+
+        return back()->with('success', 'Book marked unsupported.');
+    }
+
+    public function pauseGlobal(Request $request, IngestionOrchestrator $orchestrator): RedirectResponse
+    {
+        $orchestrator->pauseGlobally($request->user());
+
+        return back()->with('success', 'Ingestion paused globally; running stages finish safely.');
+    }
+
+    public function resumeGlobal(Request $request, IngestionOrchestrator $orchestrator): RedirectResponse
+    {
+        $orchestrator->resumeGlobally($request->user());
+
+        return back()->with('success', 'Ingestion resumed; queued runs re-dispatched.');
     }
 }

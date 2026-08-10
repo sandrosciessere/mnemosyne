@@ -8,6 +8,7 @@ use App\Http\Resources\IngestionRunResource;
 use App\Models\BookAsset;
 use App\Models\BookSubmission;
 use App\Models\IngestionRun;
+use App\Models\SystemSetting;
 use App\Services\Ingestion\IngestionOrchestrator;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -64,6 +65,45 @@ class AdminIngestionRunApiController extends Controller
         return new IngestionRunResource($run->refresh());
     }
 
+    public function pause(Request $request, IngestionRun $run, IngestionOrchestrator $orchestrator): IngestionRunResource
+    {
+        $orchestrator->pause($run, $request->user());
+
+        return new IngestionRunResource($run->refresh());
+    }
+
+    public function resume(Request $request, IngestionRun $run, IngestionOrchestrator $orchestrator): IngestionRunResource
+    {
+        $orchestrator->resume($run, $request->user());
+
+        return new IngestionRunResource($run->refresh());
+    }
+
+    public function markUnsupported(Request $request, IngestionRun $run, IngestionOrchestrator $orchestrator): IngestionRunResource
+    {
+        $validated = $request->validate([
+            'reason' => ['nullable', 'string', 'max:1000'],
+        ]);
+
+        $orchestrator->markUnsupported($run, $request->user(), $validated['reason'] ?? null);
+
+        return new IngestionRunResource($run->refresh());
+    }
+
+    public function pauseGlobal(Request $request, IngestionOrchestrator $orchestrator): JsonResponse
+    {
+        $orchestrator->pauseGlobally($request->user());
+
+        return response()->json(['data' => ['ingestion_paused' => true]]);
+    }
+
+    public function resumeGlobal(Request $request, IngestionOrchestrator $orchestrator): JsonResponse
+    {
+        $orchestrator->resumeGlobally($request->user());
+
+        return response()->json(['data' => ['ingestion_paused' => false]]);
+    }
+
     /** Real aggregates backing the control plane — never fabricated. */
     public function overview(): JsonResponse
     {
@@ -102,7 +142,51 @@ class AdminIngestionRunApiController extends Controller
                     ->count(),
                 'configured_concurrency' => (int) config('mnemosyne.ingestion.concurrency'),
                 'pipeline_version' => (string) config('mnemosyne.ingestion.pipeline_version'),
+                'ingestion_paused' => SystemSetting::ingestionPaused(),
+                'observability' => $this->observabilityAggregates(),
             ],
         ]);
+    }
+
+    private function observabilityAggregates(): array
+    {
+        $dayAgo = now()->subDay();
+        $staleThreshold = now()->subMinutes((int) config('mnemosyne.ingestion.stale_after_minutes'));
+
+        $finishedLastDay = IngestionRun::query()
+            ->whereIn('status', ['succeeded', 'failed'])
+            ->where('finished_at', '>=', $dayAgo)
+            ->count();
+        $failedLastDay = IngestionRun::query()
+            ->where('status', 'failed')
+            ->where('finished_at', '>=', $dayAgo)
+            ->count();
+
+        return [
+            'retries_last_day' => DB::table('ingestion_stage_attempts')
+                ->where('attempt', '>', 1)
+                ->where('started_at', '>=', $dayAgo)
+                ->count(),
+            'failed_last_day' => $failedLastDay,
+            'error_rate_last_day' => $finishedLastDay > 0
+                ? round($failedLastDay * 100 / $finishedLastDay, 1)
+                : null,
+            'completed_last_hour' => IngestionRun::query()
+                ->where('status', 'succeeded')
+                ->where('finished_at', '>=', now()->subHour())
+                ->count(),
+            'stale_running' => IngestionRun::query()
+                ->where('status', 'running')
+                ->where('heartbeat_at', '<', $staleThreshold)
+                ->count(),
+            'avg_stage_duration_ms' => DB::table('ingestion_stage_attempts')
+                ->select('stage', DB::raw('avg(duration_ms) as avg_ms'))
+                ->where('status', 'succeeded')
+                ->where('finished_at', '>=', $dayAgo)
+                ->groupBy('stage')
+                ->pluck('avg_ms', 'stage')
+                ->map(fn ($value) => (int) $value)
+                ->all() ?: null,
+        ];
     }
 }

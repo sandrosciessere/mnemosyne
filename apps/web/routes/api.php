@@ -42,6 +42,11 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             Route::post('ingestion-runs/{run}/retry', [AdminIngestionRunApiController::class, 'retry'])->name('ingestion-runs.retry');
             Route::post('ingestion-runs/{run}/cancel', [AdminIngestionRunApiController::class, 'cancel'])->name('ingestion-runs.cancel');
             Route::patch('ingestion-runs/{run}/priority', [AdminIngestionRunApiController::class, 'priority'])->name('ingestion-runs.priority');
+            Route::post('ingestion-runs/{run}/pause', [AdminIngestionRunApiController::class, 'pause'])->name('ingestion-runs.pause');
+            Route::post('ingestion-runs/{run}/resume', [AdminIngestionRunApiController::class, 'resume'])->name('ingestion-runs.resume');
+            Route::post('ingestion-runs/{run}/mark-unsupported', [AdminIngestionRunApiController::class, 'markUnsupported'])->name('ingestion-runs.mark-unsupported');
+            Route::post('processing/pause', [AdminIngestionRunApiController::class, 'pauseGlobal'])->name('processing.pause');
+            Route::post('processing/resume', [AdminIngestionRunApiController::class, 'resumeGlobal'])->name('processing.resume');
         });
     });
 });

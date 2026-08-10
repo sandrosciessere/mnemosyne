@@ -96,9 +96,11 @@ class BookSubmission extends Model
             null => 'approved',
             'queued' => 'queued',
             'running' => 'processing',
+            'paused' => 'paused',
             'needs_review' => 'needs_review',
             'failed' => 'failed',
             'cancelled' => 'cancelled',
+            'skipped' => 'unsupported',
             'succeeded' => 'completed',
         };
     }

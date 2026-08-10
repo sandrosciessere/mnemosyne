@@ -9,6 +9,7 @@ use App\Enums\IngestionStage;
 use App\Models\BookAccessGrant;
 use App\Models\IngestionEvent;
 use App\Models\IngestionRun;
+use App\Models\User;
 use App\Services\Library\LibraryStorage;
 use Illuminate\Support\Facades\DB;
 
@@ -106,11 +107,15 @@ class RunStateMachine
     /**
      * Terminal success: the asset is structurally understood and becomes
      * READY_FOR_ENRICHMENT (not "ready" — semantic enrichment is a future
-     * milestone). Grants the submitter access and cleans the incoming area.
+     * milestone). A run that accumulated recoverable warnings lands in
+     * READY_FOR_ENRICHMENT_WITH_WARNINGS so it is visibly distinct from a
+     * clean book. Grants the submitter access and cleans the incoming area.
      */
     public function markSucceeded(IngestionRun $run): void
     {
         DB::transaction(function () use ($run) {
+            $warningCount = $run->events()->where('type', 'stage.warning')->count();
+
             $run->forceFill([
                 'status' => IngestionRunStatus::Succeeded,
                 'progress' => 100,
@@ -120,9 +125,18 @@ class RunStateMachine
 
             $asset = $run->asset;
             if ($asset !== null) {
+                $hasWarnings = $warningCount > 0
+                    || $asset->validation_status === 'passed_with_warnings'
+                    || ($run->overridden_issues ?? []) !== [];
+
                 $asset->forceFill([
-                    'ingestion_status' => AssetIngestionStatus::ReadyForEnrichment,
+                    'ingestion_status' => $hasWarnings
+                        ? AssetIngestionStatus::ReadyForEnrichmentWithWarnings
+                        : AssetIngestionStatus::ReadyForEnrichment,
                     'pipeline_version' => $run->pipeline_version,
+                    'structure_summary' => array_merge($asset->structure_summary ?? [], [
+                        'warnings_count' => $warningCount,
+                    ]),
                 ])->save();
             }
 
@@ -177,5 +191,44 @@ class RunStateMachine
     public function heartbeat(IngestionRun $run): void
     {
         $run->forceFill(['heartbeat_at' => now()])->save();
+    }
+
+    /** Cooperative per-run pause: durable, honored at stage boundaries. */
+    public function markPaused(IngestionRun $run, ?User $actor = null): void
+    {
+        DB::transaction(function () use ($run, $actor) {
+            $run->forceFill([
+                'status' => IngestionRunStatus::Paused,
+                'heartbeat_at' => now(),
+            ])->save();
+
+            IngestionEvent::record(IngestionEventType::RunPaused, run: $run, actor: $actor, payload: [
+                'stage' => $run->current_stage?->value,
+            ]);
+        });
+    }
+
+    /**
+     * Admin decision: this book is unsupported for now. Terminal for the
+     * run (skipped) and for the asset (unsupported). A corrected file can
+     * arrive later as a NEW submission — the immutable asset is never
+     * overwritten.
+     */
+    public function markUnsupported(IngestionRun $run, User $actor, ?string $reason = null): void
+    {
+        DB::transaction(function () use ($run, $actor, $reason) {
+            $run->forceFill([
+                'status' => IngestionRunStatus::Skipped,
+                'finished_at' => now(),
+                'heartbeat_at' => now(),
+            ])->save();
+
+            IngestionEvent::record(IngestionEventType::RunMarkedUnsupported, run: $run, actor: $actor, payload: [
+                'stage' => $run->current_stage?->value,
+                'reason' => $reason !== null ? mb_substr($reason, 0, 1000) : null,
+            ]);
+
+            $run->asset?->forceFill(['ingestion_status' => AssetIngestionStatus::Unsupported])->save();
+        });
     }
 }
