@@ -207,6 +207,56 @@ paths:
         "200": { description: Priority updated and audited }
         "409": { $ref: "#/components/responses/Conflict" }
 
+  /v1/admin/ingestion-runs/{id}/pause:
+    post:
+      summary: "[admin] Cooperative per-run pause"
+      description: A running stage finishes safely; nothing further is dispatched until resume.
+      parameters: [{ $ref: "#/components/parameters/ulid" }]
+      responses:
+        "200": { description: Run paused (audited) }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/admin/ingestion-runs/{id}/resume:
+    post:
+      summary: "[admin] Resume a paused run from its durable checkpoint"
+      parameters: [{ $ref: "#/components/parameters/ulid" }]
+      responses:
+        "200": { description: Run requeued from the correct stage }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/admin/ingestion-runs/{id}/mark-unsupported:
+    post:
+      summary: "[admin] Mark a failed/needs-review/paused book unsupported (skip)"
+      description: |
+        Terminal decision (audited, with optional reason): run becomes
+        `skipped`, asset becomes `unsupported`. A corrected file is
+        submitted later as a NEW submission — immutable assets are never
+        overwritten.
+      parameters: [{ $ref: "#/components/parameters/ulid" }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason: { type: string, maxLength: 1000 }
+      responses:
+        "200": { description: Marked unsupported }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/admin/processing/pause:
+    post:
+      summary: "[admin] Pause ingestion globally"
+      description: Persisted and audited; running stages finish safely, nothing new is dispatched.
+      responses:
+        "200": { description: "{data:{ingestion_paused:true}}" }
+
+  /v1/admin/processing/resume:
+    post:
+      summary: "[admin] Resume ingestion globally and re-dispatch queued runs"
+      responses:
+        "200": { description: "{data:{ingestion_paused:false}}" }
+
 components:
   securitySchemes:
     sanctum:
@@ -267,7 +317,7 @@ components:
         original_filename: { type: string }
         status:
           type: string
-          enum: [pending_approval, approved, queued, processing, needs_review, failed, completed, rejected, cancelled]
+          enum: [pending_approval, approved, queued, processing, paused, needs_review, failed, completed, rejected, cancelled, unsupported]
           description: Merged display status (approval lifecycle + latest run)
         approval_status:
           type: string
@@ -282,7 +332,7 @@ components:
           type: [object, "null"]
           properties:
             id: { type: string }
-            status: { type: string, enum: [queued, running, needs_review, failed, succeeded, cancelled] }
+            status: { type: string, enum: [queued, running, paused, needs_review, failed, succeeded, cancelled, skipped] }
             current_stage: { type: [string, "null"], enum: [hash, validate, parse, normalize, structure, null] }
             progress: { type: integer, minimum: 0, maximum: 100, description: "Ingestion progress only — not full analysis" }
             error_code: { type: [string, "null"] }
@@ -293,14 +343,14 @@ components:
             sha256: { type: string }
             ingestion_status:
               type: string
-              enum: [pending, processing, needs_review, failed, ready_for_enrichment]
+              enum: [pending, processing, needs_review, failed, ready_for_enrichment, ready_for_enrichment_with_warnings, unsupported]
             epub_version: { type: [string, "null"] }
 
     IngestionRun:
       type: object
       properties:
         id: { type: string }
-        status: { type: string, enum: [queued, running, needs_review, failed, succeeded, cancelled] }
+        status: { type: string, enum: [queued, running, paused, needs_review, failed, succeeded, cancelled, skipped] }
         current_stage: { type: [string, "null"] }
         priority: { type: string }
         progress: { type: integer }

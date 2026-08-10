@@ -83,7 +83,16 @@ must respect:
   deletes them. Exact dedup is by file SHA-256 — never store a second
   copy of the same bytes.
 - A content-fingerprint match (`content_sha256`) creates a duplicate
-  CANDIDATE for admins — never an automatic destructive merge.
+  CANDIDATE for admins — never an automatic destructive merge, and
+  **never Edition identity by itself**: automatic Edition linking
+  requires independent bibliographic corroboration (title + creator
+  agreement) and is labeled, evidenced and reversible.
+- A contributor's normalized name is a matching hint, never an identity
+  key: homonyms must remain distinct rows (no unique constraint on
+  normalized names).
+- Filesystem discovery is READ-ONLY over the source library and writes
+  only its persistent manifest; creating submissions/copies is the
+  separate, restart-safe import step.
 - Every ingestion stage must stay idempotent and record its handler
   version in the stage attempt; artifacts are versioned per
   `pipeline_version` and written atomically (temp + rename).

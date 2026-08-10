@@ -19,8 +19,10 @@ All commands from `/srv/projects/mnemosyne` as the `mnemosyne` user.
 | Horizon status | `make artisan CMD="horizon:status"` |
 | Create first admin | `docker compose exec app php artisan mnemosyne:user:create-admin` |
 | Integration + E2E suite | `make test-integration` (then `make test-integration-down`) |
-| Filesystem discovery (dry run) | `make artisan CMD="mnemosyne:library:discover --source=<name> --dry-run"` |
+| Filesystem discovery (read-only scan) | `make artisan CMD="mnemosyne:library:discover --source=<name>"` (`--dry-run`, `--limit`, `--resume=<run>`) |
+| Import a discovery manifest | `make artisan CMD="mnemosyne:library:import <run> --priority=low"` (restart-safe) |
 | Stale-run check (manual) | `make artisan CMD="mnemosyne:ingestion:detect-stale --dry-run"` |
+| Pipeline smoke test | `make artisan CMD="mnemosyne:ingestion:selftest"` |
 
 ## Health endpoints
 
@@ -51,6 +53,13 @@ otherwise). Queue worker runs in the `horizon` container; scheduler in the
   driven by a heartbeat schedule) and runs
   `mnemosyne:ingestion:detect-stale` every 5 minutes (threshold
   `MNEMOSYNE_INGESTION_STALE_MINUTES`, default 30).
+- Pause: per-run (run detail page) and global (`/admin/processing`
+  banner/button, or `POST /api/v1/admin/processing/pause|resume`).
+  Cooperative: running stages finish safely, nothing new starts; state
+  is persisted (`ingestion_paused` setting) and survives restarts.
+- Bulk import is two phases: `discover` (read-only, resumable manifest)
+  then `import <run>` (creates submissions; restart-safe). Approve via
+  the admin UI or enable auto-approval before importing large batches.
 - New `.env` keys (see `.env.example`): `MNEMOSYNE_INTERNAL_TOKEN`
   (worker auth — generate with `openssl rand -hex 32`),
   `MNEMOSYNE_MAX_UPLOAD_BYTES`, `MNEMOSYNE_INGESTION_CONCURRENCY`,

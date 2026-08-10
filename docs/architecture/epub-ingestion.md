@@ -55,13 +55,30 @@ future stages/statuses need no schema surgery.
 submission: pending_approval ──approve/auto──▶ approved ─▶ run queued
                  │  └──reject──▶ rejected           │
                  └──cancel──▶ cancelled             ▼
-run:   queued ─▶ running ─▶ (per stage) ─▶ succeeded = READY_FOR_ENRICHMENT
+run:   queued ─▶ running ─▶ (per stage) ─▶ succeeded
                   │   │
                   │   ├─ reviewable issue ─▶ needs_review ─ override/retry ─▶ queued
                   │   ├─ hard block / fatal ─▶ failed ─ admin retry ─▶ queued
+                  │   ├─ admin pause ─▶ paused ─ resume ─▶ queued (durable checkpoint)
+                  │   ├─ admin "mark unsupported" (from failed/needs_review/paused) ─▶ skipped
                   │   └─ cancel_requested ─▶ cancelled (cooperative)
+asset: pending ─▶ processing ─▶ ready_for_enrichment
+                              ├▶ ready_for_enrichment_with_warnings  (recoverable warnings occurred)
+                              ├▶ needs_review / failed
+                              └▶ unsupported                          (admin skip decision)
 stages: hash ─▶ validate ─▶ parse ─▶ normalize ─▶ structure
 ```
+
+Pause is cooperative and two-level, both persisted and audited:
+- **Per-run**: a running stage finishes safely; nothing further is
+  dispatched. Resume re-dispatches from the durable checkpoint
+  (current stage, or the next one when its attempt already succeeded).
+- **Global** (`ingestion_paused` system setting): dispatch becomes a
+  no-op everywhere and stage boundaries park runs back in `queued`;
+  global resume re-dispatches every queued run. Survives restarts.
+"Replace file" is intentionally NOT an in-place operation: a corrected
+EPUB arrives as a new submission (new sha → new immutable asset); the
+broken one is marked unsupported.
 
 - One job per stage (never one giant job): every boundary is a durable
   checkpoint, a cancellation point and a priority-preemption point.
@@ -144,14 +161,70 @@ Retention of rejected/cancelled incoming files is a future policy —
 nothing is auto-deleted today except the incoming file of a *successful*
 run.
 
-## Citation readiness
+## Source fidelity & citation readiness
 
-Every JSONL node carries: `node_id` (stable, derived from spine index +
-ordinal), `spine_index`, `ordinal`, `type`, `text`, `heading_path`,
-`source.href`, `source.fragment`, `lang`, `char_count`. Sections map node
-ranges. Future retrieval must keep this chain (AGENTS.md invariant):
-BookAsset → spine item → source file → fragment → ordinal. EPUB CFI is
-not generated in v1 (never invented — left null by design).
+Four representations are kept separately, none substituting another:
+
+1. the **immutable original EPUB** (content-addressed);
+2. **sanitized source XHTML** per spine document
+   (`sanitized/NNNN.xhtml`): scripts/event-handlers/remote references
+   stripped, ids/anchors/`epub:type`/lang preserved, traceable via
+   `data-mnemosyne-source-href` + `data-mnemosyne-spine-index`;
+3. the **canonical normalized text** (`canonical.txt`) — exactly the
+   fingerprint corpus, so `sha256(canonical.txt) == content_sha256`;
+4. **structural node metadata** (`spine/NNNN.jsonl`).
+
+Every JSONL node carries: `node_id` (stable), `spine_index`, `ordinal`,
+`type`, `text`, `heading_path`, `source.href`, `source.fragment`, `lang`,
+`char_count`, plus the EvidenceSpan foundations:
+
+- `normalized_start` / `normalized_end` — Unicode codepoint offsets into
+  `canonical.txt` with the tested invariant
+  `canonical_text[start:end] == node.text` (null for nodes excluded from
+  the fingerprint corpus: figure alt-only nodes, non-linear docs);
+- `source_hash` — sha256 of `href \0 fragment \0 type \0 text`: stable
+  across artifact regeneration while the source location+content is
+  unchanged, so future citations can detect staleness after parser or
+  pipeline upgrades;
+- `refs` — internal link/noteref targets (`{kind, href, fragment}`),
+  `is_note` for footnote/endnote bodies, structured `table`
+  (`{caption, rows}`) on table nodes and `image` (`{href, alt}`) on
+  figures/SVG — reader navigation and note traversal stay possible
+  without semantic interpretation.
+
+Sections map node ranges. Future retrieval must keep this chain
+(AGENTS.md invariant): BookAsset → spine item → source file → fragment →
+ordinal/offsets. EPUB CFI is not generated in v1 (never invented — left
+null by design).
+
+## Compatibility matrix (first-milestone acceptance gate)
+
+`tests/Integration/CompatibilityMatrixTest.php` pushes ten heterogeneous
+synthetic fixtures through the REAL pipeline (PostgreSQL + Python
+worker), plus the hostile set. All fixtures are generated —
+no copyrighted content.
+
+| # | Fixture | Exercises | Expected |
+|---|---|---|---|
+| 1 | `epub2` | EPUB 2 + NCX, Italian | ready |
+| 2 | `epub3` | EPUB 3 + nav, ISBN/UUID, roles | ready |
+| 3 | `nestedHeadings` | h1→h4 hierarchy, heading paths | ready |
+| 4 | `manySpineDocuments` | 8 spine docs, reading order | ready |
+| 5 | `richContributors` | 2×aut + edt + ill, file-as | ready |
+| 6 | `multilingual` | multi dc:language, per-block xml:lang, Greek/Cyrillic/CJK offsets | ready |
+| 7 | `footnotes` | noterefs, aside footnotes, cross-doc links | ready |
+| 8 | `tablesAndCaptions` | caption/thead/th structure, figcaption | ready |
+| 9 | `svgAndImages` | inline SVG title, img alt, surrounding prose | ready |
+| 10 | `recoverableXhtml` | HTML-style tags → fallback parser | ready **with warnings** |
+| — | `remoteAndScript` | remote refs + scripts | ready with warnings; sanitized artifact clean |
+| — | `malformed`, `invalidOpfXml` | broken container/OPF | failed |
+| — | `pathTraversal` | zip escape | failed, `ZIP_PATH_TRAVERSAL`, never overrideable |
+| — | `encryptedContent` | DRM | needs_review, never overrideable |
+| — | `missingResource` | dangling spine ref | needs_review, overrideable → ready with warnings |
+
+Zip-bomb and oversize limits are covered by the worker's Python unit
+suite (limits are monkeypatched there; crafting real bombs in the
+integration fixtures would be wasteful).
 
 ## Deduplication & reconciliation
 
@@ -161,9 +234,14 @@ not generated in v1 (never invented — left null by design).
 - **Content**: same `content_sha256` (fingerprint v1 = sha256 of
   normalized block text in reading order; cover/CSS/metadata/packaging
   independent) across different files ⇒ open `DuplicateCandidate` with
-  metadata comparison evidence; the twin's Edition is adopted (labeled
-  `exact` via `content_fingerprint`) but assets are never merged or
-  deleted — admin decides.
+  metadata comparison evidence. **A fingerprint match alone never
+  establishes Edition identity**: the twin's Edition is adopted only when
+  the bibliographic metadata independently corroborates it (normalized
+  title + primary creator agreement, non-conflicting language), labeled
+  `high_confidence` via `content_fingerprint_with_bibliographic_agreement`.
+  Conflicting metadata keeps the assets on distinct provisional editions,
+  with the candidate left open for the admin. Assets are never merged or
+  deleted automatically.
 - **Bibliographic**: conservative, versioned, reversible. Confidence
   labels only (`exact`, `high_confidence`, `candidate`, `unresolved`) —
   no invented percentages. Auto-link requires ISBN + normalized-title
@@ -182,12 +260,42 @@ not generated in v1 (never invented — left null by design).
 - Upload limits: application-level `MNEMOSYNE_MAX_UPLOAD_BYTES` (default
   150 MB) + free-disk guard; PHP/nginx body limits must be ≥ the
   application value (see runbook).
-- Bulk import foundation: `mnemosyne:library:discover` streams an
-  allowlisted root (`MNEMOSYNE_IMPORT_SOURCES`), dry-run/limit flags,
-  symlink and containment safety, Author/Title path *hints* only. The
-  real 100k library scan runs only when its bind mount and source entry
-  are configured; large-scale hard-linking and a resumable DiscoveryRun
-  model are documented follow-ups.
+- Bulk import is TWO separated phases over an allowlisted root
+  (`MNEMOSYNE_IMPORT_SOURCES`):
+  1. `mnemosyne:library:discover --source=<name>` — **strictly read-only**
+     scan into a persistent manifest (`DiscoveryRun` + `DiscoveryEntry`):
+     no copies, no submissions. Deterministic sorted DFS with bounded
+     memory, symlink/containment safety, unreadable-dir counting,
+     Author/Title path *hints*, batch-persisted counters and a durable
+     `last_path` cursor — an interrupted 100k+ scan resumes with
+     `--resume=<run>` instead of restarting (idempotent: per-run unique
+     entries + insertOrIgnore).
+  2. `mnemosyne:library:import <run> [--priority] [--limit]` — consumes
+     `discovered` entries: re-validates each source path (symlink/
+     containment/existence), copies it into the incoming quarantine
+     (atomic), and creates the submission in the same transaction that
+     flips the entry to `imported` — re-running after any interruption
+     never duplicates submissions. Failures land in `import_failed` with
+     the error recorded.
+  The real 100k library scan runs only when its bind mount and source
+  entry are configured; large-scale hard-linking remains a follow-up.
+
+## Idempotency audit (per stage)
+
+| Stage | Durable input | Durable output | Idempotency strategy | Retry class |
+|---|---|---|---|---|
+| hash | incoming file | BookAsset row (sha unique), submission/run links | `sha256` unique constraint + already-linked short-circuit; re-hash of the same bytes converges on the same asset | I/O errors retryable; missing file fatal |
+| validate | incoming/original file | verdict + promotion to content-addressed original | promotion checks destination first (originals never overwritten), temp+rename atomic; re-run is a no-op | transport retryable; verdicts final |
+| parse | original file | `metadata.json`, `extracted_metadata` | artifact rewrite is atomic + deterministic; DB update idempotent | transport retryable |
+| normalize | original file | `spine/*.jsonl`, `sanitized/*.xhtml`, `canonical.txt` | whole-book regeneration, atomic per file, byte-deterministic (tested) | transport retryable |
+| structure | spine JSONL | `structure.json`, fingerprint, reconciliation | reads its own prior artifacts; reconciliation re-entry guarded (`edition_id` already set → keep links; candidates unique-keyed) | transport retryable |
+
+Cross-cutting: one job per stage with per-run cache lock; partial unique
+indexes forbid concurrent runs per submission/asset; attempts are
+append-only rows keyed `(run, stage, attempt)`; every transition is one
+transaction; a worker that dies mid-stage leaves artifacts that the
+retry simply rewrites (regression-tested by the retry/pause/duplicate
+suites).
 
 ## Versioning
 
