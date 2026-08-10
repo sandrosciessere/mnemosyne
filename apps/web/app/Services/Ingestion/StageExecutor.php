@@ -24,15 +24,17 @@ use Throwable;
  */
 class StageExecutor
 {
-    /** Stage handler versions shown in the control plane. The worker owns
-     *  the authoritative values for its stages; these mirror them so admin
-     *  UI and run records agree on what produced each artifact. */
+    /**
+     * Only the hash stage runs inside Laravel, so it is the only stage whose
+     * handler version Laravel owns. Worker stages (validate/parse/normalize/
+     * structure) report their authoritative handler_version in every
+     * response envelope, which is recorded on the attempt — Laravel never
+     * mirrors (and never risks drifting from) those values. An attempt that
+     * closes before the worker answered (e.g. a transport failure) records a
+     * null handler version rather than a guessed, potentially-wrong one.
+     */
     public const HANDLER_VERSIONS = [
         'hash' => '1.0.0',
-        'validate' => '1.0.0',
-        'parse' => '1.0.0',
-        'normalize' => '1.0.0',
-        'structure' => '1.0.0',
     ];
 
     public function __construct(
@@ -70,6 +72,13 @@ class StageExecutor
             return; // Cancelled/paused/failed/reviewed elsewhere meanwhile.
         }
 
+        // A run waiting on another run's asset is resolved only by that
+        // owning run's terminal transition (mirrorDuplicateOutcome), never
+        // by a stage job — drop any job that reaches it.
+        if ($run->waiting_on_asset_id !== null) {
+            return;
+        }
+
         if ($run->cancel_requested) {
             $this->stateMachine->markCancelled($run);
 
@@ -82,6 +91,24 @@ class StageExecutor
             if ($run->status === IngestionRunStatus::Running) {
                 $run->forceFill(['status' => IngestionRunStatus::Queued, 'heartbeat_at' => now()])->save();
             }
+
+            return;
+        }
+
+        // Execution-time checkpoint guard (authoritative). A duplicate or
+        // superseded delivery — from at-least-once queue semantics, a
+        // stale-scanner requeue, or a global-resume redispatch — carries a
+        // stage that is no longer the run's durable checkpoint. Drop it
+        // without side effects rather than re-executing a completed stage
+        // or regressing current_stage. The database, not the queue, decides
+        // what runs next.
+        $checkpoint = $this->orchestrator->nextDispatchStage($run);
+        if ($stage !== $checkpoint) {
+            Log::info('ingestion.stage_superseded', [
+                'run' => $run->public_id,
+                'job_stage' => $stage->value,
+                'checkpoint_stage' => $checkpoint->value,
+            ]);
 
             return;
         }
@@ -182,7 +209,23 @@ class StageExecutor
         if ($stage === IngestionStage::Structure) {
             // Conservative Work/Edition linking + content-duplicate
             // candidates. Laravel domain logic — never the worker's call.
-            $this->reconciliation->reconcile($run);
+            // Reconciliation runs inside the executor's failure boundary: an
+            // unexpected reconciliation error must fail the run coherently
+            // (the reconcile itself is transactional, so no partial links),
+            // never leave it stranded as `running` for the stale scanner.
+            try {
+                $this->reconciliation->reconcile($run);
+            } catch (Throwable $exception) {
+                Log::error('ingestion.reconciliation_failed', [
+                    'run' => $run->public_id,
+                    'correlation_id' => $run->correlation_id,
+                    'exception' => $exception,
+                ]);
+                $this->closeAttempt($attempt, 'failed', $startedAt, errorCode: 'RECONCILIATION_FAILED', errorMessage: $exception->getMessage());
+                $this->stateMachine->markFailed($run, 'RECONCILIATION_FAILED', 'Reconciliation failed after the structure stage; retry from the admin panel.');
+
+                return;
+            }
         }
 
         DB::transaction(function () use ($run, $stage, $attempt, $result, $startedAt) {
@@ -209,9 +252,22 @@ class StageExecutor
             ])->save();
         });
 
-        // Duplicate short-circuit: the hash stage may finish the whole run.
-        if (($result->summary['duplicate_of_ready_asset'] ?? false) === true) {
-            $this->stateMachine->markSucceeded($run->refresh());
+        // Exact-duplicate dispositions decided by the hash stage. Only
+        // `new` and `adopt` continue the pipeline; every other disposition
+        // finalizes the run here without reprocessing.
+        $disposition = $result->summary['duplicate_disposition'] ?? null;
+        if ($disposition !== null && ! in_array($disposition, ['new', 'adopt'], true)) {
+            $run = $run->refresh();
+
+            match ($disposition) {
+                // Existing asset is ready / unsupported / failed → mirror its
+                // terminal outcome (grant on ready, never reprocess, never
+                // silently reverse an admin unsupported decision).
+                'ready', 'unsupported', 'failed' => $this->stateMachine->mirrorDuplicateOutcome($run),
+                // Owner still in flight → stay parked until it finishes.
+                'waiting' => $this->stateMachine->parkWaitingDuplicate($run),
+                default => null,
+            };
 
             return;
         }

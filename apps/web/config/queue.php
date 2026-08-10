@@ -67,7 +67,12 @@ return [
             'driver' => 'redis',
             'connection' => env('REDIS_QUEUE_CONNECTION', 'default'),
             'queue' => env('REDIS_QUEUE', 'default'),
-            'retry_after' => (int) env('REDIS_QUEUE_RETRY_AFTER', 90),
+            // MUST exceed the longest job timeout on this connection. The
+            // ingestion supervisor runs stage jobs with timeout=600s
+            // (config/horizon.php); a smaller retry_after makes Redis
+            // redeliver a still-running stage, producing phantom
+            // MaxAttemptsExceeded failures. 660 = 600 + one minute margin.
+            'retry_after' => (int) env('REDIS_QUEUE_RETRY_AFTER', 660),
             'block_for' => null,
             'after_commit' => false,
         ],

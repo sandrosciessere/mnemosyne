@@ -50,6 +50,11 @@ class IngestionRun extends Model
         return $this->belongsTo(BookAsset::class, 'book_asset_id');
     }
 
+    public function waitingOnAsset(): BelongsTo
+    {
+        return $this->belongsTo(BookAsset::class, 'waiting_on_asset_id');
+    }
+
     public function attempts(): HasMany
     {
         return $this->hasMany(IngestionStageAttempt::class)->orderBy('id');

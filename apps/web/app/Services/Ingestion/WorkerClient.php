@@ -47,7 +47,38 @@ class WorkerClient
         }
 
         if ($response->unauthorized() || $response->status() === 503) {
+            // 401 (token) / 503 (worker fails closed while starting or
+            // unconfigured) can be transient during a deploy — retryable.
             throw new WorkerUnavailableException('Worker rejected the call: HTTP '.$response->status());
+        }
+
+        if ($response->clientError()) {
+            // Any other 4xx (e.g. 422 PATH_INVALID, 404, 405) is a
+            // DETERMINISTIC request error, not a transport blip. Retrying it
+            // is pointless and hides the real bug behind WORKER_UNAVAILABLE.
+            // Surface it as a terminal (non-retryable) stage failure that
+            // preserves the worker's own error code.
+            $body = $response->json();
+            $code = $body['detail']['code']
+                ?? (is_string($body['detail'] ?? null) ? 'WORKER_REQUEST_REJECTED' : null)
+                ?? $body['issues'][0]['code']
+                ?? 'WORKER_HTTP_'.$response->status();
+            $message = $body['detail']['message']
+                ?? (is_string($body['detail'] ?? null) ? $body['detail'] : null)
+                ?? 'Worker rejected the request: HTTP '.$response->status();
+
+            return [
+                'status' => 'failed',
+                'stage' => $stage,
+                'handler_version' => null,
+                'issues' => [[
+                    'code' => is_string($code) ? $code : 'WORKER_REQUEST_REJECTED',
+                    'severity' => 'hard_block',
+                    'message' => is_string($message) ? $message : 'Worker rejected the request.',
+                    'overrideable' => false,
+                ]],
+                'result' => [],
+            ];
         }
 
         $envelope = $response->json();

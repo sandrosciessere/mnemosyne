@@ -8,6 +8,7 @@ use App\Models\BookSubmission;
 use Illuminate\Contracts\Filesystem\Filesystem;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 
 /**
  * All library filesystem access goes through this service. Paths handed
@@ -50,9 +51,16 @@ class LibraryStorage
 
     /**
      * Promote a validated incoming file to immutable content-addressed
-     * original storage. Idempotent: if the destination already exists
-     * (exact duplicate or retried stage) the source is simply discarded
-     * later by cleanup — originals are never overwritten.
+     * original storage. The destination is addressed by $sha256, so the
+     * bytes written there MUST hash to $sha256 — this is re-verified during
+     * the copy. If the incoming file changed between the hash stage and
+     * promotion (partial write, re-stage, corruption), promotion refuses
+     * rather than poison the content-addressed store under the wrong
+     * address.
+     *
+     * Idempotent: if the destination already exists (exact duplicate or a
+     * retried stage) its bytes are re-verified against $sha256 and reused;
+     * originals are never overwritten.
      */
     public function promoteToOriginal(string $incomingRelative, string $sha256): string
     {
@@ -60,6 +68,17 @@ class LibraryStorage
         $disk = $this->disk();
 
         if ($disk->exists($destination)) {
+            // Content-addressed by construction, but verify before trusting
+            // a pre-existing original — a mismatch means the store is
+            // already corrupt and must never be silently reused.
+            $existingHash = hash_file('sha256', $this->absolutePath($destination));
+            if ($existingHash !== $sha256) {
+                throw new StorageException(
+                    'ORIGINAL_HASH_MISMATCH',
+                    'An existing original does not hash to its content address; refusing to reuse.',
+                );
+            }
+
             return $destination;
         }
 
@@ -70,9 +89,10 @@ class LibraryStorage
         $directory = dirname($destination);
         $disk->makeDirectory($directory);
 
-        // Copy to a temp name in the destination directory, then atomic
-        // rename. A crash between the two leaves only a harmless temp file.
-        $temp = $directory.'/.tmp-'.getmypid().'-'.basename($destination);
+        // Copy to a unique temp name in the destination directory, hashing
+        // the bytes as they land, then atomic rename. A crash between the
+        // two leaves only a harmless temp file (reaped by cleanup).
+        $temp = $directory.'/.tmp-'.Str::ulid()->toBase32().'-'.basename($destination);
         $source = $disk->readStream($incomingRelative);
         if ($source === null) {
             throw new StorageException('INCOMING_FILE_UNREADABLE', 'Cannot open incoming file.');
@@ -86,10 +106,34 @@ class LibraryStorage
             }
         }
 
-        if (! $disk->move($temp, $destination)) {
+        $writtenHash = hash_file('sha256', $this->absolutePath($temp));
+        if ($writtenHash !== $sha256) {
             $disk->delete($temp);
 
-            throw new StorageException('PROMOTION_FAILED', 'Atomic promotion to original storage failed.');
+            throw new StorageException(
+                'PROMOTION_HASH_MISMATCH',
+                'The file to promote no longer hashes to its expected content address; not promoting.',
+            );
+        }
+
+        try {
+            if (! $disk->move($temp, $destination)) {
+                throw new StorageException('PROMOTION_FAILED', 'Atomic promotion to original storage failed.');
+            }
+        } catch (\Throwable $exception) {
+            $disk->delete($temp);
+
+            if ($exception instanceof StorageException) {
+                throw $exception;
+            }
+
+            // Lost a race to an identical concurrent promotion: the
+            // destination now exists with identical (verified) bytes.
+            if ($disk->exists($destination)) {
+                return $destination;
+            }
+
+            throw new StorageException('PROMOTION_FAILED', 'Atomic promotion to original storage failed: '.$exception->getMessage());
         }
 
         return $destination;

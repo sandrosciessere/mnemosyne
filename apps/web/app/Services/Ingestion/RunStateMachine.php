@@ -7,6 +7,7 @@ use App\Enums\IngestionEventType;
 use App\Enums\IngestionRunStatus;
 use App\Enums\IngestionStage;
 use App\Models\BookAccessGrant;
+use App\Models\BookAsset;
 use App\Models\IngestionEvent;
 use App\Models\IngestionRun;
 use App\Models\User;
@@ -80,6 +81,10 @@ class RunStateMachine
 
             $run->asset?->forceFill(['ingestion_status' => AssetIngestionStatus::Failed])->save();
         });
+
+        if ($run->asset !== null) {
+            $this->finalizeWaitingDuplicates($run->asset);
+        }
     }
 
     public function markCancelled(IngestionRun $run): void
@@ -97,8 +102,14 @@ class RunStateMachine
 
             // An asset abandoned mid-pipeline goes back to pending: a new
             // run (e.g. another submission of the same file) can pick it up.
+            // This covers both an in-flight asset (processing) and one left
+            // parked in needs_review by the run being cancelled — otherwise
+            // the asset would be stranded in needs_review with no owning run.
             $asset = $run->asset;
-            if ($asset !== null && $asset->ingestion_status === AssetIngestionStatus::Processing) {
+            if ($asset !== null && in_array($asset->ingestion_status, [
+                AssetIngestionStatus::Processing,
+                AssetIngestionStatus::NeedsReview,
+            ], true)) {
                 $asset->forceFill(['ingestion_status' => AssetIngestionStatus::Pending])->save();
             }
         });
@@ -149,6 +160,132 @@ class RunStateMachine
 
         // Filesystem cleanup happens outside the transaction: losing a
         // temp file cleanup on crash is harmless; losing the state is not.
+        $this->cleanupIncomingFor($run);
+
+        // Duplicate submissions that parked waiting on this asset can now be
+        // finalized against its terminal outcome.
+        if ($run->asset !== null) {
+            $this->finalizeWaitingDuplicates($run->asset);
+        }
+    }
+
+    /**
+     * Park an exact-duplicate run that arrived while another run still owns
+     * the asset's pipeline. It waits (queued) without owning the asset until
+     * the owning run reaches a terminal state, then mirrors that outcome.
+     */
+    public function parkWaitingDuplicate(IngestionRun $run): void
+    {
+        DB::transaction(function () use ($run) {
+            $run->forceFill([
+                'status' => IngestionRunStatus::Queued,
+                'heartbeat_at' => now(),
+            ])->save();
+
+            IngestionEvent::record(IngestionEventType::RunQueued, run: $run, payload: [
+                'reason' => 'waiting_on_existing_asset',
+                'waiting_on_asset_id' => $run->waitingOnAsset?->public_id,
+            ]);
+        });
+    }
+
+    /**
+     * Finalize a duplicate run by mirroring the terminal state of the asset
+     * it points at — the file was never reprocessed, so the outcome must
+     * match the original: ready → succeeded (+ grant), unsupported →
+     * skipped, failed → failed. Never claims a success the original did not
+     * earn, and never reverses an admin unsupported decision.
+     */
+    public function mirrorDuplicateOutcome(IngestionRun $run): void
+    {
+        $asset = $run->asset;
+
+        if ($asset === null) {
+            // Nothing to mirror against — treat as a benign failed run.
+            $this->markFailed($run, 'DUPLICATE_NO_ASSET', 'Duplicate run had no asset to mirror.');
+
+            return;
+        }
+
+        DB::transaction(function () use ($run, $asset) {
+            $run->forceFill(['waiting_on_asset_id' => null])->save();
+
+            if ($asset->ingestion_status->isReadyForEnrichment()) {
+                $run->forceFill([
+                    'status' => IngestionRunStatus::Succeeded,
+                    'progress' => 100,
+                    'finished_at' => now(),
+                    'heartbeat_at' => now(),
+                ])->save();
+
+                $this->grantSubmitterAccess($run);
+
+                IngestionEvent::record(IngestionEventType::RunSucceeded, run: $run, payload: [
+                    'duplicate_of' => $asset->public_id,
+                    'mirrored_status' => $asset->ingestion_status->value,
+                ]);
+
+                return;
+            }
+
+            if ($asset->ingestion_status === AssetIngestionStatus::Unsupported) {
+                $run->forceFill([
+                    'status' => IngestionRunStatus::Skipped,
+                    'finished_at' => now(),
+                    'heartbeat_at' => now(),
+                ])->save();
+
+                IngestionEvent::record(IngestionEventType::RunMarkedUnsupported, run: $run, payload: [
+                    'duplicate_of' => $asset->public_id,
+                    'reason' => 'mirrors an asset an administrator marked unsupported',
+                ]);
+
+                return;
+            }
+
+            // Failed (or any other non-ready terminal): mirror the failure.
+            $run->forceFill([
+                'status' => IngestionRunStatus::Failed,
+                'finished_at' => now(),
+                'heartbeat_at' => now(),
+                'last_error_code' => 'DUPLICATE_OF_FAILED_ASSET',
+                'last_error_message' => 'Exact duplicate of an asset whose ingestion failed.',
+            ])->save();
+
+            IngestionEvent::record(IngestionEventType::RunFailed, run: $run, payload: [
+                'duplicate_of' => $asset->public_id,
+                'error_code' => 'DUPLICATE_OF_FAILED_ASSET',
+            ]);
+        });
+
+        // The duplicate's own incoming copy is never needed — the asset
+        // already exists (or failed). Reclaim it.
+        $this->cleanupIncomingFor($run);
+    }
+
+    /**
+     * When an owning run reaches a terminal state, resolve every duplicate
+     * run that parked waiting on its asset.
+     */
+    private function finalizeWaitingDuplicates(BookAsset $asset): void
+    {
+        $waiting = IngestionRun::query()
+            ->where('waiting_on_asset_id', $asset->id)
+            ->whereIn('status', array_map(fn ($case) => $case->value, IngestionRunStatus::activeCases()))
+            ->get();
+
+        foreach ($waiting as $run) {
+            // Adopt the asset for provenance/grants, then mirror. The owning
+            // run is already terminal, so linking a now-terminal duplicate
+            // cannot violate the one-active-run-per-asset index.
+            $run->forceFill(['book_asset_id' => $asset->id])->save();
+            $run->setRelation('asset', $asset);
+            $this->mirrorDuplicateOutcome($run);
+        }
+    }
+
+    private function cleanupIncomingFor(IngestionRun $run): void
+    {
         $submission = $run->submission;
         if ($submission?->incoming_path !== null) {
             $this->storage->cleanupIncoming($submission);
@@ -230,5 +367,9 @@ class RunStateMachine
 
             $run->asset?->forceFill(['ingestion_status' => AssetIngestionStatus::Unsupported])->save();
         });
+
+        if ($run->asset !== null) {
+            $this->finalizeWaitingDuplicates($run->asset);
+        }
     }
 }

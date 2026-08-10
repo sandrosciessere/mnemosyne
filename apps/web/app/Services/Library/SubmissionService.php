@@ -4,6 +4,7 @@ namespace App\Services\Library;
 
 use App\Enums\IngestionEventType;
 use App\Enums\IngestionPriority;
+use App\Enums\IngestionRunStatus;
 use App\Enums\SubmissionSourceType;
 use App\Enums\SubmissionStatus;
 use App\Exceptions\Library\InvalidTransitionException;
@@ -172,7 +173,7 @@ class SubmissionService
             }
 
             $activeRun = $submission->runs()
-                ->whereIn('status', ['queued', 'running', 'needs_review'])
+                ->whereIn('status', array_map(fn ($case) => $case->value, IngestionRunStatus::activeCases()))
                 ->first();
 
             if ($activeRun === null) {
