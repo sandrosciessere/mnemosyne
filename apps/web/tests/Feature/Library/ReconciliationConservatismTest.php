@@ -62,6 +62,35 @@ class ReconciliationConservatismTest extends TestCase
         );
     }
 
+    // Correction B — the canonical homonym case: two "Collected Poems" by
+    // two different "John Smith" authors. Title + an UNRESOLVED creator
+    // string is matching evidence, never Work identity, so Contributor,
+    // Work and Edition all stay distinct and a review candidate is opened —
+    // no silent auto-merge one level up from the contributor.
+    public function test_same_title_homonym_creator_stays_distinct_with_candidate(): void
+    {
+        $meta = [
+            'title' => 'Collected Poems',
+            'creators' => [['name' => 'John Smith', 'roles' => ['aut']]],
+            'languages' => ['en'],
+            'identifiers' => [],
+        ];
+
+        $first = $this->reconcileAsset($meta);
+        $second = $this->reconcileAsset($meta);
+
+        $this->assertSame(2, Contributor::query()->where('normalized_name', 'john smith')->count());
+        $this->assertSame(2, Work::query()->count(), 'Distinct provisional works, never an auto-merge.');
+        $this->assertNotSame($first->edition->work_id, $second->edition->work_id);
+        $this->assertNotSame($first->edition_id, $second->edition_id);
+        $this->assertSame('unresolved', $second->reconciliation['confidence']);
+
+        // The relation is preserved for later authority resolution, not merged.
+        $candidate = DuplicateCandidate::query()->where('reason', 'work_reconciliation_candidate')->sole();
+        $this->assertNotNull($candidate);
+        $this->assertSame('open', $candidate->status->value);
+    }
+
     // G — a filename-derived title must never establish identity.
     public function test_titleless_epubs_named_alike_do_not_match(): void
     {
@@ -127,8 +156,9 @@ class ReconciliationConservatismTest extends TestCase
     }
 
     // C / J — same title+creator+language but conflicting ISBN: distinct
-    // editions under one work + a review candidate, never a merge.
-    public function test_conflicting_isbn_yields_distinct_editions_and_candidate(): void
+    // WORKS and distinct editions + a review candidate, never a merge.
+    // Title + unresolved-creator string is evidence, not Work identity.
+    public function test_conflicting_isbn_yields_distinct_works_and_candidate(): void
     {
         $shared = [
             'title' => 'Shared Title',
@@ -144,7 +174,12 @@ class ReconciliationConservatismTest extends TestCase
         ]]]);
 
         $this->assertNotSame($first->edition_id, $second->edition_id, 'Conflicting ISBN must never collapse editions.');
-        $this->assertSame(1, Work::query()->count(), 'Same title+creator is same WORK, distinct editions.');
+        $this->assertNotSame(
+            $first->edition->work_id,
+            $second->edition->work_id,
+            'Title + unresolved creator string is not Work identity.',
+        );
+        $this->assertSame(2, Work::query()->count(), 'Distinct provisional works, never an auto-merge.');
 
         $candidate = DuplicateCandidate::query()->where('reason', 'bibliographic_conflict')->sole();
         $this->assertSame('conflict', $candidate->evidence['dimensions']['identifier']);

@@ -267,14 +267,20 @@ dimension in CONFLICT:**
 On adoption the incoming asset's identifiers are attached to the adopted
 edition (canonical forms included).
 
-**Work vs Edition.** Title + creator agreement is evidence of the same
-**Work**, never automatically the same **Edition**. Two legitimate editions
-of one work are kept as *Work → Edition A + Edition B*, never collapsed. A
-title+creator match therefore reuses the Work and mints a *distinct
-provisional Edition*; if a sibling edition's strong metadata CONFLICTS
-(e.g. same title+creator+language but ISBN A vs ISBN B), a
-`bibliographic_conflict` `DuplicateCandidate` is opened for review — never
-an auto-merge.
+**Work identity is conservative.** A normalized title + an *unresolved*
+creator string is matching evidence, **never sufficient proof of the same
+Work** — treating it as identity would re-introduce homonym collapse one
+level above the contributor (two different "John Smith" authors of
+"Collected Poems" are two Works, not one). So a book without a strong Work
+signal always gets a *fresh provisional Work + Edition*. Strong automatic
+Work reuse still happens through the strong paths only: an existing Edition
+reached via canonical ISBN (Path A) or via a corroborated content-
+fingerprint twin (Path B) carries its own Work. Any other edition that
+merely shares the normalized title + creator string is surfaced as a
+`DuplicateCandidate` for later authority resolution — `bibliographic_conflict`
+when strong metadata disagrees (e.g. ISBN A vs ISBN B), otherwise
+`work_reconciliation_candidate` — and is **never auto-merged**. A duplicate
+provisional Work is always preferred over a wrong automatic merge.
 
 **Provisional contributor identity.** A normalized-name match is evidence
 for future authority resolution, not identity. Absent strong corroborating

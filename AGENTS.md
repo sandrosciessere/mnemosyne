@@ -90,6 +90,20 @@ must respect:
 - A contributor's normalized name is a matching hint, never an identity
   key: homonyms must remain distinct rows (no unique constraint on
   normalized names).
+- The identity hierarchy is strict — no layer may treat evidence as
+  identity more aggressively than the layer beneath it allows.
+  **BookAsset** identity = exact SHA-256 (physical duplicate) only.
+  **Contributor** identity is never a normalized-name string.
+  **Work** identity: a normalized title + an *unresolved* creator string
+  is matching evidence, NEVER sufficient identity — do not auto-reuse a
+  Work on that alone (it would re-introduce homonym collapse one level
+  up); such siblings become a review candidate. Auto Work reuse requires a
+  strong signal (an existing Edition reached via canonical identifier, or a
+  corroborated content-fingerprint twin). **Edition** auto-adoption
+  requires corroboration AND the absence of any conflicting strong metadata
+  (ISBN/publisher+year/language). Prefer a duplicate provisional Work over
+  a wrong automatic merge; false negatives are reconciled later, silent
+  false-positive identity contaminates the knowledge base.
 - Filesystem discovery is READ-ONLY over the source library and writes
   only its persistent manifest; creating submissions/copies is the
   separate, restart-safe import step.

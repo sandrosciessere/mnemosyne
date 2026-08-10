@@ -212,17 +212,16 @@ class ReconciliationService
             break;
         }
 
-        // Item F: title+creator agreement is evidence of the same WORK,
-        // never automatically the same EDITION. So we do NOT adopt an
-        // edition here; createProvisionalEdition reuses the Work (on
-        // title+creator evidence) and mints a distinct provisional Edition.
+        // Title + creator agreement is EVIDENCE, never automatic identity —
+        // not of the same Edition (Item F) and, because contributor
+        // identities are provisional/unresolved, not of the same Work
+        // either. A fresh provisional Work + Edition is created; any
+        // same-title+creator sibling is surfaced as a review candidate.
         $edition = $this->createProvisionalEdition(
             $asset, $meta, $displayTitle, $normalizedDisplayTitle, $matchTitle, $titleSource, $language,
         );
 
-        // A plausible sibling edition (same work title + creator) whose
-        // strong metadata conflicts is surfaced as a review candidate.
-        $this->flagBibliographicConflicts($asset, $meta, $edition, $matchTitle, $language);
+        $this->flagWorkSiblingCandidates($asset, $meta, $edition, $matchTitle, $language);
 
         return [$edition, 'provisional_creation', 'unresolved', [
             'normalized_title' => $normalizedDisplayTitle,
@@ -239,35 +238,27 @@ class ReconciliationService
         string $titleSource,
         ?string $language,
     ): Edition {
-        // Attach to an existing Work only on real (metadata) title +
-        // creator EVIDENCE; a filename-derived title never reuses a Work.
-        $work = null;
-        $creatorKeys = $this->creatorKeys($meta);
-
-        if ($matchTitle !== null && $creatorKeys !== []) {
-            $work = Work::query()
-                ->where('normalized_title', $matchTitle)
-                ->whereHas(
-                    'editions.contributors',
-                    fn ($contributors) => $contributors->whereIn('normalized_name', $creatorKeys),
-                )
-                ->first();
-        }
-
-        if ($work === null) {
-            $work = new Work;
-            $work->forceFill([
-                'canonical_title' => mb_substr($displayTitle, 0, 1000),
-                'normalized_title' => $normalizedDisplayTitle,
-                'original_language' => $language,
-                'status' => 'provisional',
-                'reconciliation' => [
-                    'method' => 'provisional_creation',
-                    'title_source' => $titleSource,
-                    'version' => self::VERSION,
-                ],
-            ])->save();
-        }
+        // A new provisional Work every time. A normalized title plus an
+        // UNRESOLVED creator string is matching evidence, NEVER sufficient
+        // proof of the same abstract Work — treating it as identity would
+        // reintroduce the homonym-collapse problem one level up (two
+        // different "John Smith" authors of "Collected Poems" are two Works,
+        // not one). Strong Work reuse still happens elsewhere: an existing
+        // Edition reached via canonical ISBN (Path A) or via a corroborated
+        // content-fingerprint twin carries its own Work. Same-title+creator
+        // siblings are surfaced as a review candidate (never auto-merged).
+        $work = new Work;
+        $work->forceFill([
+            'canonical_title' => mb_substr($displayTitle, 0, 1000),
+            'normalized_title' => $normalizedDisplayTitle,
+            'original_language' => $language,
+            'status' => 'provisional',
+            'reconciliation' => [
+                'method' => 'provisional_creation',
+                'title_source' => $titleSource,
+                'version' => self::VERSION,
+            ],
+        ])->save();
 
         $publicationDate = $meta['dates'][0]['value'] ?? $meta['date'] ?? null;
 
@@ -505,11 +496,18 @@ class ReconciliationService
     }
 
     /**
-     * Sibling editions sharing the same WORK evidence (normalized title +
-     * creator) whose strong metadata conflicts are surfaced for review
-     * (item J). Distinct editions are preferred over any collapse.
+     * Editions in OTHER Works that share the same normalized title AND a
+     * matching creator string are, by themselves, only matching evidence —
+     * the contributor identities are provisional/unresolved, so this is not
+     * proof of the same Work. Each such sibling is surfaced as a review
+     * candidate so an admin (or future authority resolution) can decide:
+     *  - metadata conflicts (different ISBN/publisher/year/language)
+     *    → `bibliographic_conflict`;
+     *  - otherwise → `work_reconciliation_candidate` (same title + creator
+     *    string, unresolved identity).
+     * Records are NEVER auto-merged; distinct provisional Works are kept.
      */
-    private function flagBibliographicConflicts(
+    private function flagWorkSiblingCandidates(
         BookAsset $asset,
         array $meta,
         Edition $newEdition,
@@ -528,6 +526,11 @@ class ReconciliationService
 
         $siblings = Edition::query()
             ->where('id', '!=', $newEdition->id)
+            ->where(function ($query) use ($newEdition) {
+                // Only OTHER works — an edition already in the new edition's
+                // own work is not a reconciliation candidate against itself.
+                $query->whereNull('work_id')->orWhere('work_id', '!=', $newEdition->work_id);
+            })
             ->whereHas('work', fn ($work) => $work->where('normalized_title', $matchTitle))
             ->whereHas('contributors', fn ($contributors) => $contributors->whereIn('normalized_name', $creatorKeys))
             ->with(['contributors', 'identifiers', 'assets'])
@@ -535,11 +538,28 @@ class ReconciliationService
             ->get();
 
         foreach ($siblings as $sibling) {
+            $other = $sibling->assets()->first();
+
+            if ($other === null) {
+                continue;
+            }
+
             $dims = $this->classifyDimensions($meta, $sibling, $matchTitle, $language);
 
             if ($this->hasConflict($dims)) {
                 $this->flagConflictWithEdition($asset, $meta, $sibling, $dims);
+
+                continue;
             }
+
+            $this->openDuplicateCandidate($asset, $other, 'work_reconciliation_candidate', [
+                'reason' => 'same_normalized_title_and_creator_string_unresolved_identity',
+                'dimensions' => $dims,
+                'metadata_comparison' => [
+                    'this' => $this->comparableMetadata($asset),
+                    'other' => $this->comparableMetadata($other),
+                ],
+            ]);
         }
     }
 
