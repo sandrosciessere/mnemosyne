@@ -37,6 +37,16 @@ return [
             'throw' => false,
         ],
 
+        // Persistent Mnemosyne data tree (/data in containers). All library
+        // paths stored in the database are relative to this disk. Tests
+        // override the root together with mnemosyne.data_path.
+        'data' => [
+            'driver' => 'local',
+            'root' => env('MNEMOSYNE_DATA_PATH', storage_path('app')),
+            'serve' => false,
+            'throw' => true,
+        ],
+
         'public' => [
             'driver' => 'local',
             'root' => storage_path('app/public'),

@@ -51,4 +51,80 @@ return [
         'base_url' => env('OLLAMA_BASE_URL', 'http://host.docker.internal:11434'),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Internal AI worker (service-to-service)
+    |--------------------------------------------------------------------------
+    |
+    | The Python worker is reachable only on the backend Docker network.
+    | Every internal call carries the shared token; the token lives in the
+    | untracked .env and must never be committed or logged.
+    |
+    */
+
+    'worker' => [
+        'base_url' => env('MNEMOSYNE_WORKER_BASE_URL', 'http://ai-worker:8000'),
+        'internal_token' => env('MNEMOSYNE_INTERNAL_TOKEN'),
+        'timeout_seconds' => (int) env('MNEMOSYNE_WORKER_TIMEOUT', 330),
+        'connect_timeout_seconds' => (int) env('MNEMOSYNE_WORKER_CONNECT_TIMEOUT', 5),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | EPUB ingestion pipeline
+    |--------------------------------------------------------------------------
+    |
+    | Versions identify what produced each artifact set; bump them when the
+    | corresponding behavior changes so reprocessing can be targeted.
+    | Limits are conservative but compatible with real books. Concurrency
+    | stays low on purpose: this is a shared host.
+    |
+    */
+
+    'ingestion' => [
+        'pipeline_version' => '1',
+
+        'queue_connection' => env('MNEMOSYNE_INGESTION_QUEUE_CONNECTION', env('QUEUE_CONNECTION', 'redis')),
+        'concurrency' => (int) env('MNEMOSYNE_INGESTION_CONCURRENCY', 2),
+
+        'max_upload_bytes' => (int) env('MNEMOSYNE_MAX_UPLOAD_BYTES', 150_000_000),
+        'min_free_disk_bytes' => (int) env('MNEMOSYNE_MIN_FREE_DISK_BYTES', 50_000_000_000),
+
+        'retry' => [
+            'max_attempts_per_stage' => (int) env('MNEMOSYNE_INGESTION_MAX_ATTEMPTS', 3),
+            'backoff_seconds' => [30, 120, 600],
+        ],
+
+        'stale_after_minutes' => (int) env('MNEMOSYNE_INGESTION_STALE_MINUTES', 30),
+
+        'rate_limits' => [
+            'submissions_per_hour' => (int) env('MNEMOSYNE_SUBMISSIONS_PER_HOUR', 30),
+        ],
+
+        // Store used for cross-process ingestion locks. Redis in the real
+        // stack; host-side test runs override this to the database store.
+        'lock_store' => env('MNEMOSYNE_LOCK_STORE'),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Filesystem import sources (allowlist)
+    |--------------------------------------------------------------------------
+    |
+    | Roots mnemosyne:library:discover may traverse, as "name=path" pairs
+    | separated by commas (e.g. "main=/import/library"). Empty by default:
+    | the real library path is added only when its bind mount exists.
+    | Paths outside this allowlist are never touched.
+    |
+    */
+
+    'import_sources' => collect(explode(',', (string) env('MNEMOSYNE_IMPORT_SOURCES', '')))
+        ->filter(fn ($pair) => str_contains($pair, '='))
+        ->mapWithKeys(function ($pair) {
+            [$name, $path] = explode('=', $pair, 2);
+
+            return [trim($name) => trim($path)];
+        })
+        ->all(),
+
 ];
