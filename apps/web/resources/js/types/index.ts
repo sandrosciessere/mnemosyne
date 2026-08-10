@@ -1,5 +1,7 @@
 import { LucideIcon } from 'lucide-react';
 
+export * from './library';
+
 export type UserRole = 'admin' | 'user';
 
 export interface Auth {
