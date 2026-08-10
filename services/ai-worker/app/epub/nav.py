@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from app.config import Limits
 from app.epub.issues import EpubFailure, Issue, reviewable
 from app.epub.opf import PackageDoc, resolve_href, split_fragment
-from app.epub.safety import read_member
+from app.epub.safety import DecompressionBudget, read_member
 from app.epub.xmlutils import XmlParseError, localname, parse_xml
 
 OPS_TYPE = "{http://www.idpf.org/2007/ops}type"
@@ -97,7 +97,13 @@ def _parse_ncx(data: bytes, ncx_path: str) -> TocResult:
     return result
 
 
-def extract_toc(zf: zipfile.ZipFile, package: PackageDoc, limits: Limits, issues: list[Issue]) -> TocResult:
+def extract_toc(
+    zf: zipfile.ZipFile,
+    package: PackageDoc,
+    limits: Limits,
+    issues: list[Issue],
+    budget: DecompressionBudget | None = None,
+) -> TocResult:
     """Extract the TOC (nav preferred for EPUB 3, NCX otherwise).
 
     A malformed/missing TOC with a readable spine yields a reviewable
@@ -117,7 +123,7 @@ def extract_toc(zf: zipfile.ZipFile, package: PackageDoc, limits: Limits, issues
             errors.append(f"{kind} document {item.href!r} not found in archive")
             continue
         try:
-            data = read_member(zf, path, limits)
+            data = read_member(zf, path, limits, budget=budget)
             result = _parse_nav_doc(data, path) if kind == "nav" else _parse_ncx(data, path)
         except (XmlParseError, EpubFailure) as exc:
             errors.append(f"{kind} document {path!r} unreadable: {exc}")

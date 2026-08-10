@@ -82,6 +82,8 @@ def test_node_shape_and_source():
         "source_hash",
         "normalized_start",
         "normalized_end",
+        "normalized_start_utf16",
+        "normalized_end_utf16",
     }
     assert node["source"] == {"href": "OEBPS/text/ch1.xhtml", "fragment": "p-key"}
     assert node["linear"] is True

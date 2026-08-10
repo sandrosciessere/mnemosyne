@@ -335,6 +335,23 @@ def build_not_a_zip() -> bytes:
     return b"this is definitely not a zip archive"
 
 
+def build_astral_epub() -> bytes:
+    """EPUB whose first chapter carries astral (non-BMP) characters.
+
+    U+1F600 and U+10000 each occupy a single Python codepoint but two
+    UTF-16 code units, so the two offset systems must diverge here.
+    """
+    body = (
+        '<h1 id="ast-title">Astral</h1>\n'
+        '<p id="ast-p">Before \U0001f600 middle \U00010000 after here.</p>'
+    )
+    entries = [
+        (name, _xhtml(body) if name == "OEBPS/text/ch1.xhtml" else data)
+        for name, data in _epub3_entries()
+    ]
+    return _zip_bytes(entries)
+
+
 # --- rich compatibility fixture ---------------------------------------------
 # Nine spine documents exercising nested headings, multilingual text,
 # footnotes/noterefs, tables, figures/SVG, sanitization targets, a

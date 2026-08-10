@@ -133,6 +133,55 @@ def test_offsets_unit_level_match_helper():
                 assert canonical[node["normalized_start"] : node["normalized_end"]] == node["text"]
 
 
+# --- astral / UTF-16 offset interop ------------------------------------------
+
+
+def test_astral_offsets_slice_in_codepoint_and_utf16(client, install_epub, data_root):
+    artifact_dir, _norm, _structure = _run_pipeline(
+        client, install_epub, data_root, builders.build_astral_epub(), artifact_dir="artifacts/astral"
+    )
+    canonical = (artifact_dir / "canonical.txt").read_bytes().decode("utf-8")
+    canonical_u16 = canonical.encode("utf-16-le")
+    nodes = _load_nodes(artifact_dir, 3)
+    astral = next(node for node in nodes if "\U0001f600" in node["text"])
+
+    # both coordinate systems are present and, for astral text, genuinely differ
+    cp_span = astral["normalized_end"] - astral["normalized_start"]
+    u16_span = astral["normalized_end_utf16"] - astral["normalized_start_utf16"]
+    assert u16_span > cp_span  # U+1F600 and U+10000 are 2 UTF-16 units each
+
+    # codepoint slice (Python semantics)
+    assert canonical[astral["normalized_start"] : astral["normalized_end"]] == astral["text"]
+    # UTF-16 code-unit slice (JavaScript semantics)
+    start16, end16 = astral["normalized_start_utf16"] * 2, astral["normalized_end_utf16"] * 2
+    assert canonical_u16[start16:end16].decode("utf-16-le") == astral["text"]
+
+    # every node carries both systems; excluded nodes are null in both
+    for node in nodes:
+        assert "normalized_start_utf16" in node and "normalized_end_utf16" in node
+        if node["normalized_start"] is None:
+            assert node["normalized_start_utf16"] is None
+            assert node["normalized_end_utf16"] is None
+
+
+def test_astral_artifacts_are_byte_identical_across_runs(client, install_epub, data_root):
+    rel = install_epub(builders.build_astral_epub())
+    payload = _payload(rel, artifact_dir="artifacts/astral2")
+    assert client.post("/internal/v1/epub/normalize", json=payload, headers=AUTH).json()["status"] in (
+        "passed",
+        "passed_with_warnings",
+    )
+    artifact_dir = data_root / "artifacts/astral2"
+    first = [(artifact_dir / f"spine/{index:04d}.jsonl").read_bytes() for index in range(3)]
+    assert b"normalized_start_utf16" in first[0]
+    assert client.post("/internal/v1/epub/normalize", json=payload, headers=AUTH).json()["status"] in (
+        "passed",
+        "passed_with_warnings",
+    )
+    second = [(artifact_dir / f"spine/{index:04d}.jsonl").read_bytes() for index in range(3)]
+    assert first == second
+
+
 # --- source_hash --------------------------------------------------------------
 
 

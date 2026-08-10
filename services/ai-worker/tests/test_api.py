@@ -216,7 +216,7 @@ def test_pipeline_e2e(client, install_epub, data_root):
     assert manifest["source_sha256"] == "0" * 64
     assert set(manifest["stages"].keys()) == {"parse", "normalize", "structure"}
     assert manifest["stages"]["parse"]["handler_version"] == "1.0.0"
-    assert manifest["stages"]["normalize"]["handler_version"] == "1.1.0"
+    assert manifest["stages"]["normalize"]["handler_version"] == "1.2.0"
     assert manifest["stages"]["structure"]["handler_version"] == "1.1.0"
     for stage in manifest["stages"].values():
         assert "completed_at" in stage
@@ -254,6 +254,42 @@ def test_structure_without_normalize_fails(client, install_epub):
     body = client.post("/internal/v1/epub/structure", json=payload, headers=AUTH).json()
     assert body["status"] == "failed"
     assert any(issue["code"] == "SPINE_ARTIFACTS_MISSING" for issue in body["issues"])
+
+
+def test_structure_rejects_stale_source_artifacts(client, install_epub, data_root):
+    # normalize under source-A, then run structure claiming a different source.
+    rel = install_epub(builders.build_epub3())
+    normalize_payload = {**_stage_payload(rel, artifact_dir="artifacts/prov"), "source_sha256": "a" * 64}
+    assert client.post("/internal/v1/epub/normalize", json=normalize_payload, headers=AUTH).json()["status"] == "passed"
+
+    structure_payload = {**normalize_payload, "source_sha256": "b" * 64}
+    body = client.post("/internal/v1/epub/structure", json=structure_payload, headers=AUTH).json()
+    assert body["status"] == "failed"
+    issue = next(i for i in body["issues"] if i["code"] == "STALE_ARTIFACTS")
+    assert issue["overrideable"] is False
+    assert issue["details"]["expected"] == "b" * 64
+    assert issue["details"]["found"] == "a" * 64
+    # the stale structure.json is never written
+    assert not (data_root / "artifacts/prov/structure.json").is_file()
+
+
+def test_structure_rejects_version_mismatched_artifacts(client, install_epub, data_root):
+    rel = install_epub(builders.build_epub3())
+    payload = _stage_payload(rel, artifact_dir="artifacts/vermismatch")
+    assert client.post("/internal/v1/epub/normalize", json=payload, headers=AUTH).json()["status"] == "passed"
+
+    # simulate artifacts produced by an older normalizer version
+    manifest_path = data_root / "artifacts/vermismatch/manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["stages"]["normalize"]["handler_version"] = "0.9.0"
+    manifest_path.write_text(json.dumps(manifest))
+
+    body = client.post("/internal/v1/epub/structure", json=payload, headers=AUTH).json()
+    assert body["status"] == "failed"
+    issue = next(i for i in body["issues"] if i["code"] == "ARTIFACTS_VERSION_MISMATCH")
+    assert issue["overrideable"] is False
+    assert issue["details"]["found"] == "0.9.0"
+    assert issue["details"]["expected"] == "1.2.0"
 
 
 def test_epub2_pipeline(client, install_epub, data_root):

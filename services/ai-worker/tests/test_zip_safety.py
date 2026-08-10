@@ -1,8 +1,10 @@
+import zipfile
+
 import pytest
 
 from app.config import get_limits
 from app.epub.issues import EpubFailure
-from app.epub.safety import inspect_zip
+from app.epub.safety import DecompressionBudget, inspect_zip, read_member
 from tests import epub_builders as builders
 
 
@@ -113,3 +115,47 @@ def test_compressed_file_size_cap(tmp_path, monkeypatch):
     path = _write(tmp_path, builders.build_epub3())
     _report, issues = inspect_zip(path, get_limits())
     assert "EPUB_FILE_TOO_LARGE" in _codes(issues)
+
+
+# --- streaming enforcement (read_member): the real defence -------------------
+#
+# A truly "lying" small central-directory file_size is not exploitable through
+# stdlib zipfile: ZipExtFile stops returning after file_size bytes, so a
+# header that understates the real inflated size just truncates the read. The
+# genuine defence is therefore counting ACTUAL decompressed bytes as they
+# stream, enforced per-member (max_bytes) and cumulatively (DecompressionBudget)
+# — never trusting the header size. These tests exercise both.
+
+
+def test_streaming_per_member_cap_counts_actual_decompressed_bytes(tmp_path):
+    path = _write(tmp_path, builders.build_epub3())
+    limits = get_limits()  # generous default per-entry / header limits
+    with zipfile.ZipFile(path) as zf:
+        name = next(info.filename for info in zf.infolist() if info.filename.endswith("ch1.xhtml"))
+        assert zf.getinfo(name).file_size > 64  # header check under defaults would pass
+        with pytest.raises(EpubFailure) as excinfo:
+            read_member(zf, name, limits, max_bytes=64)
+    assert excinfo.value.issue.code == "ZIP_ENTRY_TOO_LARGE"
+    assert excinfo.value.issue.overrideable is False
+    assert excinfo.value.issue.details["limit"] == 64
+
+
+def test_cumulative_decompression_budget_trips_across_members(tmp_path):
+    path = _write(tmp_path, builders.build_epub3())
+    limits = get_limits()
+    with zipfile.ZipFile(path) as zf:
+        textual = [info.filename for info in zf.infolist() if info.filename.endswith(".xhtml")]
+        assert len(textual) >= 2
+        largest = max(zf.getinfo(name).file_size for name in textual)
+        # Any single member fits under the cap; their honest sum does not, so
+        # only the cumulative budget (not a per-member cap) can catch this.
+        budget = DecompressionBudget(largest + 8)
+        fully_read = 0
+        with pytest.raises(EpubFailure) as excinfo:
+            for name in textual:
+                read_member(zf, name, limits, budget=budget)
+                fully_read += 1
+    assert excinfo.value.issue.code == "ZIP_UNCOMPRESSED_TOO_LARGE"
+    assert excinfo.value.issue.overrideable is False
+    assert fully_read >= 1  # first member passed; a later one tripped the sum
+    assert budget.consumed > budget.cap

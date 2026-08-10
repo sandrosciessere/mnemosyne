@@ -97,12 +97,28 @@ def _execute(stage: str, handler_version: str, correlation_id: str | None, fn: C
     return JSONResponse(envelope, status_code=http_status)
 
 
-def _load_package(zf: zipfile.ZipFile, limits: Limits, issues: list[Issue]) -> opf.PackageDoc:
+def _load_package(
+    zf: zipfile.ZipFile,
+    limits: Limits,
+    issues: list[Issue],
+    budget: safety.DecompressionBudget | None = None,
+) -> opf.PackageDoc:
     issues.extend(container.check_mimetype(zf, limits))
     opf_path = container.locate_opf(zf, limits, issues)
     issues.extend(container.check_encryption(zf, limits))
-    opf_data = safety.read_member(zf, opf_path, limits)
+    opf_data = safety.read_member(zf, opf_path, limits, budget=budget)
     return opf.parse_opf(opf_data, opf_path, limits, issues)
+
+
+def _read_manifest(artifact_dir: Path) -> dict | None:
+    """Read manifest.json for provenance checks; None when absent/corrupt."""
+    manifest_path = artifact_dir / artifacts.MANIFEST_FILE
+    try:
+        with open(manifest_path, encoding="utf-8") as fh:
+            loaded = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
 
 
 def _inspect_or_fail(epub_path: Path, limits: Limits, issues: list[Issue]) -> safety.ZipReport | None:
@@ -152,8 +168,9 @@ def epub_parse(req: StageRequest) -> JSONResponse:
         if report is None:
             return None
         deadline.check()
+        budget = safety.DecompressionBudget(limits.max_epub_uncompressed_bytes)
         with zipfile.ZipFile(epub_path) as zf:
-            package = _load_package(zf, limits, issues)
+            package = _load_package(zf, limits, issues, budget=budget)
 
         cover_item = package.manifest.get(package.cover_id) if package.cover_id else None
         metadata_payload = {
@@ -206,9 +223,12 @@ def epub_normalize(req: StageRequest) -> JSONResponse:
         if report is None:
             return None
         deadline.check()
+        # One cumulative decompression budget for every member inflated in
+        # this request (OPF + all spine documents), counting actual bytes.
+        budget = safety.DecompressionBudget(limits.max_epub_uncompressed_bytes)
         with zipfile.ZipFile(epub_path) as zf:
-            package = _load_package(zf, limits, issues)
-            docs = normalize.normalize_book(zf, package, limits, issues, deadline)
+            package = _load_package(zf, limits, issues, budget=budget)
+            docs = normalize.normalize_book(zf, package, limits, issues, deadline, budget=budget)
 
         # Canonical offsets span the whole book, so they are (re)applied after
         # every spine document has been extracted, before any JSONL is written.
@@ -260,9 +280,43 @@ def epub_structure(req: StageRequest) -> JSONResponse:
         if report is None:
             return None
         deadline.check()
+        budget = safety.DecompressionBudget(limits.max_epub_uncompressed_bytes)
         with zipfile.ZipFile(epub_path) as zf:
-            package = _load_package(zf, limits, issues)
-            toc_result = nav.extract_toc(zf, package, limits, issues)
+            package = _load_package(zf, limits, issues, budget=budget)
+            toc_result = nav.extract_toc(zf, package, limits, issues, budget=budget)
+
+        # Provenance gate: the spine JSONL artifacts are reused by existence
+        # only, so before fingerprinting them confirm they were produced by
+        # THIS source and the CURRENT normalizer. A mismatch means stale
+        # artifacts (a different upload or an older normalizer); fail terminally
+        # and demand reprocessing rather than trusting stale JSONL.
+        manifest = _read_manifest(artifact_dir)
+        normalize_stage = (manifest.get("stages") or {}).get("normalize") if isinstance(manifest, dict) else None
+        if manifest is None or not isinstance(normalize_stage, dict):
+            raise EpubFailure(
+                hard_block(
+                    "SPINE_ARTIFACTS_MISSING",
+                    "normalize artifacts/manifest are missing; run /epub/normalize first",
+                )
+            )
+        if manifest.get("source_sha256") != req.source_sha256:
+            raise EpubFailure(
+                hard_block(
+                    "STALE_ARTIFACTS",
+                    "normalize artifacts were produced from a different source; reprocess needed",
+                    expected=req.source_sha256,
+                    found=manifest.get("source_sha256"),
+                )
+            )
+        if normalize_stage.get("handler_version") != versions.NORMALIZER_VERSION:
+            raise EpubFailure(
+                hard_block(
+                    "ARTIFACTS_VERSION_MISMATCH",
+                    "normalize artifacts were produced by a different normalizer version; reprocess needed",
+                    expected=versions.NORMALIZER_VERSION,
+                    found=normalize_stage.get("handler_version"),
+                )
+            )
 
         # Determinism & speed: nodes are re-read from the JSONL artifacts
         # produced by /epub/normalize — content documents are NOT re-parsed.

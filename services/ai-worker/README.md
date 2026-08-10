@@ -54,11 +54,18 @@ return HTTP 500 with the same envelope (`INTERNAL_ERROR`, generic
 message; the traceback is only logged, with the correlation id).
 
 Handler versions (`app/versions.py`): `VALIDATOR_VERSION` `1.0.0`,
-`PARSER_VERSION` `1.0.0`, `NORMALIZER_VERSION` `1.1.0`,
-`STRUCTURER_VERSION` `1.1.0`. The 1.1.0 bump adds the sanitized source
-artifacts, `canonical.txt` and the citation-oriented node fields below;
-`FINGERPRINT_VERSION` stays `"1"` and `content_sha256` for a given file
-is identical to the 1.0.0 output.
+`PARSER_VERSION` `1.0.0`, `NORMALIZER_VERSION` `1.2.0`,
+`STRUCTURER_VERSION` `1.1.0`. The 1.1.0 normalizer added the sanitized
+source artifacts, `canonical.txt` and the citation-oriented node fields
+below; the 1.2.0 bump adds the UTF-16 code-unit node offsets
+(`normalized_start_utf16`/`normalized_end_utf16`).
+`FINGERPRINT_VERSION` stays `"1"`, `canonical.txt` is byte-for-byte
+unchanged, and `content_sha256` for a given file is identical to the
+1.0.0 output. Before the structure stage reuses `spine/*.jsonl`, it
+verifies the normalize `manifest.json` records the same `source_sha256`
+and the current `NORMALIZER_VERSION`; a mismatch fails the stage
+(`STALE_ARTIFACTS` / `ARTIFACTS_VERSION_MISMATCH`, both terminal) instead
+of fingerprinting stale artifacts.
 
 ## Issue codes
 
@@ -122,12 +129,16 @@ Written atomically (`<name>.tmp-<pid>` + fsync + `os.replace`) under
   `{node_id, spine_index, ordinal, type, level, text, heading_path,
   source: {href, fragment}, lang, linear, char_count, has_image,
   is_note, refs, table, image, source_hash, normalized_start,
-  normalized_end}` (see “Node fields” below)
+  normalized_end, normalized_start_utf16, normalized_end_utf16}`
+  (see “Node fields” below)
 - `sanitized/NNNN.xhtml` — sanitized copy of the ORIGINAL spine content
   document (same `NNNN` as the spine JSONL; written only for textual
-  spine items). Well-formed XML, inert (see “Sanitization rules”), root
-  carries `data-mnemosyne-source-href` (zip-internal spine href) and
-  `data-mnemosyne-spine-index` for traceability.
+  spine items). Well-formed, inert **allowlisted** XHTML: no scripts, no
+  remote-fetching references, and no CSS at all (see “Sanitization
+  rules”). It is not a faithful visual rendering — it is a citation-safe
+  structural view. Root carries `data-mnemosyne-source-href`
+  (zip-internal spine href) and `data-mnemosyne-spine-index` for
+  traceability.
 - `canonical.txt` — UTF-8; EXACTLY the fingerprint corpus: the texts of
   the included nodes joined with single `\n` in ascending ordinal order
   (no trailing newline). Invariant: `sha256(canonical.txt bytes) ==
@@ -137,7 +148,7 @@ Written atomically (`<name>.tmp-<pid>` + fsync + `os.replace`) under
   generated_at, stages, outputs (path/sha256/bytes), warnings}`;
   rewritten completely at each stage completion, rebuilt if corrupt.
 
-### Node fields added in normalizer 1.1.0
+### Node fields added in normalizer 1.1.0 / 1.2.0
 
 - `normalized_start` / `normalized_end` — **unicode codepoint** offsets
   into the decoded `canonical.txt` string such that
@@ -146,6 +157,15 @@ Written atomically (`<name>.tmp-<pid>` + fsync + `os.replace`) under
   `has_image`, and every node of a `linear: false` spine document).
   Offsets are assigned after the whole book is extracted, because the
   corpus spans all spine documents.
+- `normalized_start_utf16` / `normalized_end_utf16` (normalizer 1.2.0) —
+  the same offsets expressed in **UTF-16 code units** for the JavaScript
+  (UTF-16) reader: astral characters (e.g. `U+1F600`, `U+10000`) count as
+  two units. Computed deterministically from the same `canonical.txt`
+  corpus (`len(text.encode("utf-16-le")) // 2` per node, with the `\n`
+  separator counted as one unit, matching the codepoint system), so
+  `canonical.txt.encode("utf-16-le")[2*start16:2*end16].decode("utf-16-le")
+  == text`. `null` exactly when the codepoint offsets are `null`. The
+  codepoint fields and `canonical.txt`/`content_sha256` are unchanged.
 - `source_hash` — sha256 hex of the UTF-8 bytes of
   `f"{source_href}\x00{fragment or ''}\x00{node_type}\x00{text}"`.
   Stale-citation detector: deterministic and timestamp-free, so it is
@@ -174,22 +194,32 @@ Written atomically (`<name>.tmp-<pid>` + fsync + `os.replace`) under
 
 ### Sanitization rules (`sanitized/NNNN.xhtml`)
 
-| Rule | Treatment |
-|---|---|
-| `script`, `style`, `template`, `iframe`, `object`, `embed`, `form`, `input`, `button`, `base`, `foreignObject` | subtree removed entirely |
-| `meta http-equiv="refresh"` | removed |
-| `audio` / `video` / `source` with remote references | removed |
-| `on*` event attributes | removed |
-| attribute values starting with `javascript:` (or `vbscript:`) | attribute removed |
-| `src` / `href` / `xlink:href` / `poster` / `data` / `srcset` with `http:` / `https:` / `ftp:` scheme or protocol-relative `//` | attribute dropped (URL never kept); element marked `data-mnemosyne-removed-remote="1"` |
-| comments, processing instructions, DTD | dropped (only our own XML declaration is emitted) |
-| `id`, `epub:type`, `xml:lang`/`lang`, structural tags, internal/relative hrefs and fragment anchors, relative `img@src`, sanitized inline SVG | preserved unchanged |
+The sanitizer is a strict **allowlist**, not a denylist. The output is
+inert allowlisted XHTML: it contains no scripts, nothing that fetches a
+remote resource, and no CSS whatsoever (no `<style>`, no
+`<link rel=stylesheet>`, no `style` attributes). It is not a
+pixel-faithful rendering — it is a citation-safe structural view.
+
+| Category | Members | Treatment |
+|---|---|---|
+| **Allowed elements** | `html`, `head`, `title`, `body`, `div`, `p`, `span`, `h1`–`h6`, `ul`/`ol`/`li`, `dl`/`dt`/`dd`, `blockquote`, `pre`, `code`, `em`/`strong`/`i`/`b`/`u`/`s`/`sub`/`sup`/`small`/`mark`, `br`, `hr`, `a`, `img`, `figure`/`figcaption`, `table`/`thead`/`tbody`/`tfoot`/`tr`/`th`/`td`/`caption`/`colgroup`/`col`, `section`/`article`/`aside`/`nav`/`header`/`footer`, `ruby`/`rt`/`rp` | kept |
+| **Allowed attributes** | global: `id`, `class`, `lang`/`xml:lang`, `dir`, `title`, `epub:type`, `data-mnemosyne-*`; `a@href`; `img@src`/`img@alt`; table `colspan`/`rowspan`/`headers`/`scope` | kept |
+| **Removed subtree** | `script`, `style`, `template`, `iframe`, `object`, `embed`, `applet`, `form`, `input`, `button`, `base`, `link`, `meta`, `noscript`, `foreignObject` | element and all descendants dropped |
+| **Inline SVG** | any `<svg>` (and its `use`/`xlink:href`/`foreignObject`/`animate`/… descendants) | replaced by an inert `<span data-mnemosyne-svg="1">` placeholder; no SVG markup survives |
+| **Unknown / non-allowlisted element** | anything not listed above (e.g. MathML, exotic/custom tags) | **unwrapped** — the element is discarded but its children and text are kept in reading order |
+| **Non-allowlisted attribute** | `on*` handlers, `style`, and every other attribute | removed |
+| **URL attribute value** (`a@href`, `img@src`) | value is canonicalized first — lower-cased, with all ASCII whitespace and C0 control chars (`0x00`–`0x20`) stripped **anywhere** in the value, so `java\tscript:` / `\x01javascript:` cannot slip through | `javascript:`/`vbscript:`/`data:`/`blob:`/`file:` (or any scheme at all) → attribute dropped; `http:`/`https:`/`ftp:`/protocol-relative `//` → dropped and element marked `data-mnemosyne-removed-remote="1"`; only relative/internal references and `#fragment` anchors are kept |
+| Comments, processing instructions, DTD | — | dropped (only our own XML declaration is emitted) |
+
+Because canonical text and node offsets come from `normalize.py` (never
+from this artifact), unwrapping/dropping markup is safe for fidelity: the
+text is preserved and `canonical.txt`/`content_sha256` are unaffected.
 
 Documents that fail XML parsing take the `html.parser` fallback (with
 the existing `XHTML_NOT_WELL_FORMED` warning): a best-effort tree is
-reconstructed and run through the **same** sanitization pass, so even
-fallback output is well-formed XML and never contains scripts or remote
-references.
+reconstructed and run through the **same** allowlist pass, so even
+fallback output is well-formed XML and never contains scripts, CSS or
+remote references.
 
 ## Determinism guarantees
 

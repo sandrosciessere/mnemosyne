@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from app.config import Limits
 from app.epub.issues import Deadline, Issue, reviewable, warning
 from app.epub.opf import PackageDoc, resolve_href
-from app.epub.safety import read_member
+from app.epub.safety import DecompressionBudget, read_member
 from app.epub.sanitize import sanitize_document
 from app.epub.structure import fingerprint_included
 from app.epub.xhtml import extract_blocks
@@ -62,29 +62,46 @@ def source_hash(source_href: str, fragment: str | None, node_type: str, text: st
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _utf16_units(text: str) -> int:
+    """Length of ``text`` in UTF-16 code units (astral chars count as 2)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def apply_canonical_offsets(docs: list[DocResult]) -> str:
-    """Assign unicode-codepoint offsets into the canonical text; returns it.
+    """Assign codepoint AND UTF-16 offsets into the canonical text; returns it.
 
     The canonical text is EXACTLY the fingerprint corpus (same inclusion
     rules and order as ``structure.content_fingerprint``, single ``\\n``
     separators, no trailing newline), so sha256 of its UTF-8 bytes equals
-    ``content_sha256``. Nodes excluded from the corpus keep ``None``.
+    ``content_sha256``. Each included node gets both Python unicode-codepoint
+    offsets (``normalized_start``/``normalized_end``) and UTF-16 code-unit
+    offsets (``normalized_start_utf16``/``normalized_end_utf16``) for the
+    JavaScript (UTF-16) reader — both computed deterministically from the
+    same corpus, with the ``\\n`` separator counted as one unit in each
+    system. Nodes excluded from the corpus keep ``None`` for all four.
     Idempotent: nodes are already in ascending global-ordinal order.
     """
     texts: list[str] = []
     position = 0
+    position16 = 0
     for doc in docs:
         for node in doc.nodes:
             if fingerprint_included(node):
                 if texts:
-                    position += 1  # the '\n' separator
+                    position += 1  # the '\n' separator (1 codepoint)
+                    position16 += 1  # the '\n' separator (1 UTF-16 unit)
                 node["normalized_start"] = position
+                node["normalized_start_utf16"] = position16
                 position += len(node["text"])
+                position16 += _utf16_units(node["text"])
                 node["normalized_end"] = position
+                node["normalized_end_utf16"] = position16
                 texts.append(node["text"])
             else:
                 node["normalized_start"] = None
                 node["normalized_end"] = None
+                node["normalized_start_utf16"] = None
+                node["normalized_end_utf16"] = None
     return "\n".join(texts)
 
 
@@ -94,7 +111,12 @@ def normalize_book(
     limits: Limits,
     issues: list[Issue],
     deadline: Deadline,
+    budget: DecompressionBudget | None = None,
 ) -> list[DocResult]:
+    # Many spine documents are inflated in this one request; a shared
+    # cumulative budget bounds their combined ACTUAL decompressed size.
+    if budget is None:
+        budget = DecompressionBudget(limits.max_epub_uncompressed_bytes)
     names = set(zf.namelist())
     docs: list[DocResult] = []
     missing: list[str] = []
@@ -117,7 +139,7 @@ def normalize_book(
         if item.media_type not in _TEXTUAL_MEDIA_TYPES:
             continue
 
-        data = read_member(zf, href, limits)
+        data = read_member(zf, href, limits, budget=budget)
         doc.sanitized = sanitize_document(data, href, spine_index)
         blocks = extract_blocks(data, href, issues)
 
@@ -146,6 +168,8 @@ def normalize_book(
                 "source_hash": source_hash(href, block.fragment, block.type, block.text),
                 "normalized_start": None,
                 "normalized_end": None,
+                "normalized_start_utf16": None,
+                "normalized_end_utf16": None,
             }
             doc.nodes.append(node)
             doc.char_count += len(block.text)

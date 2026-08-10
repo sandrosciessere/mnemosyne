@@ -1,8 +1,10 @@
 """Zip-level safety inspection. Never extracts anything to disk.
 
 ``inspect_zip`` walks the central directory only; ``read_member`` is the
-single sanctioned way to read a member and enforces the per-entry
-uncompressed cap *while reading* (zip metadata can lie about sizes).
+single sanctioned way to read a member and enforces both the per-entry
+uncompressed cap and the cumulative :class:`DecompressionBudget` *while
+reading* (zip metadata can lie about sizes, so only bytes actually
+inflated are counted — never the attacker-controlled header ``file_size``).
 """
 
 import re
@@ -15,6 +17,34 @@ from app.epub.issues import EpubFailure, Issue, hard_block, reviewable
 
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
 _CHUNK = 65_536
+
+
+class DecompressionBudget:
+    """Cumulative actual-decompressed-bytes cap for a single stage request.
+
+    Central-directory sizes are attacker-controlled, so the real defence is
+    counting bytes as they stream out of the inflater. One budget instance
+    is threaded through every :func:`read_member` call of a request so that
+    many individually-legal members cannot together exceed the cap. Tripping
+    it raises the same terminal, non-overrideable hard block as the header
+    total check.
+    """
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self.consumed = 0
+
+    def charge(self, nbytes: int) -> None:
+        self.consumed += nbytes
+        if self.consumed > self.cap:
+            raise EpubFailure(
+                hard_block(
+                    "ZIP_UNCOMPRESSED_TOO_LARGE",
+                    "cumulative decompressed size exceeded the limit while reading",
+                    bytes=self.consumed,
+                    limit=self.cap,
+                )
+            )
 
 
 @dataclass
@@ -160,8 +190,20 @@ def inspect_zip(path: Path, limits: Limits) -> tuple[ZipReport, list[Issue]]:
     return report, issues
 
 
-def read_member(zf: zipfile.ZipFile, name: str, limits: Limits, max_bytes: int | None = None) -> bytes:
-    """Read a member fully, enforcing the uncompressed cap while streaming."""
+def read_member(
+    zf: zipfile.ZipFile,
+    name: str,
+    limits: Limits,
+    max_bytes: int | None = None,
+    budget: "DecompressionBudget | None" = None,
+) -> bytes:
+    """Read a member fully, enforcing the uncompressed caps while streaming.
+
+    Two independent caps are enforced against bytes actually inflated (never
+    the header ``file_size``): the per-member ``max_bytes`` (defaults to
+    ``limits.max_entry_uncompressed_bytes``) and, when supplied, the
+    cross-member cumulative ``budget`` for the whole request.
+    """
     cap = max_bytes if max_bytes is not None else limits.max_entry_uncompressed_bytes
     chunks: list[bytes] = []
     total = 0
@@ -181,6 +223,8 @@ def read_member(zf: zipfile.ZipFile, name: str, limits: Limits, max_bytes: int |
                             limit=cap,
                         )
                     )
+                if budget is not None:
+                    budget.charge(len(chunk))
                 chunks.append(chunk)
     except KeyError as exc:
         raise EpubFailure(hard_block("ZIP_MEMBER_MISSING", "zip member not found", entries=[name])) from exc
