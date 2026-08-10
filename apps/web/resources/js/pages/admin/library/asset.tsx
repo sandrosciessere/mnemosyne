@@ -38,7 +38,7 @@ interface AssetDetail {
 
 interface AssetSubmission {
     public_id: string;
-    submitter: string | null;
+    submitter: { name: string; email: string } | null;
     source_type: string | null;
     is_exact_duplicate: boolean;
     created_at: string;
@@ -195,7 +195,11 @@ export default function AssetShow({ asset, submissions, runs, duplicates }: Asse
                                     {submissions.map((submission) => (
                                         <li key={submission.public_id} className="flex flex-wrap items-center justify-between gap-2">
                                             <div>
-                                                <span className="font-medium">{submission.submitter ?? 'Unknown submitter'}</span>
+                                                <span className="font-medium">
+                                                    {submission.submitter
+                                                        ? `${submission.submitter.name} (${submission.submitter.email})`
+                                                        : 'Filesystem import'}
+                                                </span>
                                                 <p className="text-muted-foreground text-xs">
                                                     {submission.source_type ?? ''}
                                                     {submission.is_exact_duplicate ? ' · exact duplicate' : ''}
