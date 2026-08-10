@@ -13,9 +13,9 @@ return new class extends Migration
             $table->ulid('public_id')->unique();
             $table->string('name', 512);
             $table->string('sort_name', 512)->nullable();
-            // Exact-string dedup key only. Two homonymous people will share a
-            // row at this stage; future authority resolution can split them
-            // because edition_contributors preserves the raw credited name.
+            // Matching signal only — NOT an identity key (see the follow-up
+            // migration that drops the original unique constraint: homonyms
+            // must never be collapsed by schema).
             $table->string('normalized_name', 512)->unique();
             $table->timestamps();
         });

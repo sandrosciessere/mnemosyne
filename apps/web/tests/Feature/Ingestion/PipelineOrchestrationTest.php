@@ -262,13 +262,64 @@ class PipelineOrchestrationTest extends TestCase
         $this->assertSame('open', $candidate->status->value);
         $this->assertNotNull($candidate->evidence['metadata_comparison']);
 
-        // Both assets survive — no destructive merge. Same edition adopted
-        // (exact via content fingerprint), which is reversible.
+        // Both assets survive — no destructive merge. The edition is
+        // shared only because the bibliographic metadata (title, creator,
+        // language) independently corroborates the fingerprint match —
+        // and it is labeled high_confidence, never bibliographic "exact".
         $this->assertSame('ready_for_enrichment', $assetA->ingestion_status->value);
         $this->assertSame('ready_for_enrichment', $assetB->ingestion_status->value);
         $this->assertSame($assetA->edition_id, $assetB->edition_id);
+        $this->assertSame('high_confidence', $assetB->reconciliation['confidence']);
+        $this->assertSame('content_fingerprint_with_bibliographic_agreement', $assetB->reconciliation['method']);
         $this->assertSame(1, Work::query()->count());
         $this->assertDatabaseHas('ingestion_events', ['type' => 'asset.duplicate_candidate']);
+    }
+
+    public function test_same_content_with_conflicting_metadata_does_not_share_edition(): void
+    {
+        // Identical normalized text but the OPF metadata names a different
+        // book: the fingerprint alone must NOT establish edition identity.
+        $sharedContentSha = hash('sha256', 'same-text-conflicting-meta');
+        $call = 0;
+
+        Http::fake(function ($request) use (&$call, $sharedContentSha) {
+            $stage = basename(parse_url($request->url(), PHP_URL_PATH));
+
+            if ($stage === 'parse') {
+                $call++;
+                $meta = $call === 1
+                    ? ['title' => 'First Title', 'creators' => [['name' => 'Alice Author', 'roles' => ['aut']]]]
+                    : ['title' => 'Completely Different Title', 'creators' => [['name' => 'Bob Other', 'roles' => ['aut']]]];
+
+                return Http::response($this->passedEnvelope('parse', [
+                    'metadata' => $meta + ['languages' => ['en'], 'identifiers' => []],
+                ]));
+            }
+
+            if ($stage === 'structure') {
+                return Http::response($this->passedEnvelope('structure', [
+                    'content_sha256' => $sharedContentSha,
+                    'fingerprint_version' => '1',
+                    'counts' => ['sections' => 1, 'toc_entries' => 0, 'nodes' => 3, 'chars' => 90],
+                ]));
+            }
+
+            return Http::response($this->happyEnvelopeFor($stage));
+        });
+
+        $first = $this->submitAndApprove(content: 'conflict-bytes-one');
+        $second = $this->submitAndApprove(content: 'conflict-bytes-two');
+
+        $assetA = $first->refresh()->asset;
+        $assetB = $second->refresh()->asset;
+
+        $this->assertSame($assetA->content_sha256, $assetB->content_sha256);
+        // Evidence recorded for the admin…
+        $this->assertSame(1, DuplicateCandidate::query()->count());
+        // …but NO silent identity: two provisional editions/works.
+        $this->assertNotSame($assetA->edition_id, $assetB->edition_id);
+        $this->assertSame(2, Work::query()->count());
+        $this->assertSame('unresolved', $assetB->reconciliation['confidence']);
     }
 
     public function test_reviewable_issue_pauses_run_and_override_resumes_it(): void

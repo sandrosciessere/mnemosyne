@@ -111,21 +111,62 @@ class ReconciliationService
                 'reason' => 'content_sha256_match',
             ]);
 
-            // Same normalized content strongly implies the same edition
-            // text; adopting the twin's edition (when linked) is the one
-            // automatic link we allow, labeled exact via fingerprint.
-            if ($asset->edition_id === null && $twin->edition_id !== null) {
+            // A content-fingerprint match is EVIDENCE, never bibliographic
+            // identity by itself (two prints of the same text can be
+            // different editions; metadata can conflict). The twin's
+            // Edition is adopted only when the bibliographic metadata
+            // independently corroborates it.
+            if ($asset->edition_id === null
+                && $twin->edition_id !== null
+                && $this->bibliographicallyAgrees($asset, $twin->edition)) {
                 $asset->forceFill([
                     'edition_id' => $twin->edition_id,
                     'reconciliation' => [
-                        'method' => 'content_fingerprint',
-                        'confidence' => 'exact',
-                        'evidence' => ['content_sha256' => $asset->content_sha256, 'twin_asset' => $twin->public_id],
+                        'method' => 'content_fingerprint_with_bibliographic_agreement',
+                        'confidence' => 'high_confidence',
+                        'evidence' => [
+                            'content_sha256' => $asset->content_sha256,
+                            'twin_asset' => $twin->public_id,
+                            'agreement' => ['title', 'primary_creator', 'language'],
+                        ],
                         'version' => self::VERSION,
                     ],
                 ])->save();
             }
         }
+    }
+
+    /**
+     * Conservative corroboration: normalized title AND primary creator
+     * must agree; language must not conflict when both sides declare one.
+     */
+    private function bibliographicallyAgrees(BookAsset $asset, Edition $edition): bool
+    {
+        $meta = $asset->extracted_metadata ?? [];
+
+        $title = trim((string) ($meta['title'] ?? ''));
+        if ($title === '' || Work::normalizeTitle($edition->title) !== Work::normalizeTitle($title)) {
+            return false;
+        }
+
+        $creator = $meta['creators'][0]['name'] ?? null;
+        if ($creator === null) {
+            return false;
+        }
+
+        $editionCreators = $edition->contributors
+            ->map(fn ($contributor) => $contributor->normalized_name);
+
+        if (! $editionCreators->contains(Contributor::normalizeName($creator))) {
+            return false;
+        }
+
+        $language = $meta['languages'][0] ?? null;
+        if ($language !== null && $edition->language !== null && $language !== $edition->language) {
+            return false;
+        }
+
+        return true;
     }
 
     /** @return array{0: Edition, 1: string, 2: string, 3: array} */
@@ -274,7 +315,13 @@ class ReconciliationService
 
             $normalized = Contributor::normalizeName($name);
 
-            $contributor = Contributor::query()->where('normalized_name', $normalized)->first();
+            // Name equality is only a HINT: homonyms may coexist as
+            // distinct rows. Ingestion deterministically reuses the oldest
+            // match; future authority resolution can re-link editions.
+            $contributor = Contributor::query()
+                ->where('normalized_name', $normalized)
+                ->orderBy('id')
+                ->first();
 
             if ($contributor === null) {
                 $contributor = new Contributor;

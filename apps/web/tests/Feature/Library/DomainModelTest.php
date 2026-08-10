@@ -113,6 +113,25 @@ class DomainModelTest extends TestCase
         $this->assertSame(['key' => SystemSetting::SUBMISSION_AUTO_APPROVAL, 'value' => true], $event->payload);
     }
 
+    public function test_contributor_homonyms_are_not_collapsed_by_schema(): void
+    {
+        // Two different humans named the same: both rows must coexist.
+        $first = Contributor::factory()->create([
+            'name' => 'John Smith',
+            'normalized_name' => Contributor::normalizeName('John Smith'),
+        ]);
+        $second = Contributor::factory()->create([
+            'name' => 'John Smith',
+            'normalized_name' => Contributor::normalizeName('John Smith'),
+        ]);
+
+        $this->assertNotSame($first->id, $second->id);
+        $this->assertSame(
+            2,
+            Contributor::query()->where('normalized_name', 'john smith')->count(),
+        );
+    }
+
     public function test_content_addressed_storage_path_is_sharded(): void
     {
         $sha = str_repeat('ab', 32);

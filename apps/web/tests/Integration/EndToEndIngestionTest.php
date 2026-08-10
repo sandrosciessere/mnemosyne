@@ -209,10 +209,17 @@ class EndToEndIngestionTest extends IntegrationTestCase
         $this->assertSame('content_sha256_match', $candidate->reason);
         $this->assertSame('open', $candidate->status->value);
 
-        // Both assets alive, no destructive merge; edition shared (exact
-        // content match) but reversible.
+        // Both assets alive, no destructive merge; the edition is shared
+        // only because title/creator/language independently corroborate
+        // the fingerprint match — labeled high_confidence, never "exact"
+        // bibliographic identity, and reversible.
         $this->assertSame(2, BookAsset::query()->count());
         $this->assertSame($assetA->edition_id, $assetB->edition_id);
+        $this->assertSame('high_confidence', $assetB->reconciliation['confidence']);
+        $this->assertSame(
+            'content_fingerprint_with_bibliographic_agreement',
+            $assetB->reconciliation['method'],
+        );
     }
 
     public function test_malformed_epub_fails_cleanly(): void
