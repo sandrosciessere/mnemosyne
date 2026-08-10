@@ -10,6 +10,11 @@ class EditionIdentifier extends Model
     protected $fillable = [
         'scheme',
         'value',
+        // Canonical identity: an ISBN-10 and its ISBN-13 equivalent share
+        // one canonical form (isbn13). Matching compares canonical values,
+        // not the declared scheme/value pair.
+        'canonical_scheme',
+        'canonical_value',
         'raw_value',
         'source',
     ];

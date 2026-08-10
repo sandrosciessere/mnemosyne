@@ -228,6 +228,11 @@ integration fixtures would be wasteful).
 
 ## Deduplication & reconciliation
 
+Reconciliation is deliberately conservative: it prefers duplicate rows and
+open review candidates over any silent merge, and it keeps **identity**
+strictly separate from **matching evidence**. A normalized name or title is
+only evidence that records *may* relate — never a global identity key.
+
 - **Exact**: same `sha256` ⇒ same asset; one physical file, N
   submissions/provenance records, submitter granted access, no
   reprocessing (only a hash attempt on the new run).
@@ -235,18 +240,60 @@ integration fixtures would be wasteful).
   normalized block text in reading order; cover/CSS/metadata/packaging
   independent) across different files ⇒ open `DuplicateCandidate` with
   metadata comparison evidence. **A fingerprint match alone never
-  establishes Edition identity**: the twin's Edition is adopted only when
-  the bibliographic metadata independently corroborates it (normalized
-  title + primary creator agreement, non-conflicting language), labeled
+  establishes Edition identity** (Path B below). Conflicting metadata keeps
+  the assets on distinct provisional editions with the candidate left open.
+  Assets are never merged or deleted automatically.
+
+**Evidence classification.** Each strong dimension of an incoming asset is
+classified against a candidate edition as **AGREE**, **ABSENT**, or
+**CONFLICT** — missing data is always ABSENT, *never* affirmative
+agreement. Dimensions: `title`, `creator`, `language`, `identifier`
+(canonical ISBN / doi / uuid), `publisher_year`. Evidence payloads record
+the per-dimension verdict explicitly (e.g. `{"language":"absent"}`).
+
+**Edition auto-link is allowed on exactly two paths, each requiring NO
+dimension in CONFLICT:**
+
+- **Path A — canonical identifier.** A trusted canonical ISBN-13 matches an
+  existing edition *and* the title AGREEs. ISBN-10 and its ISBN-13
+  equivalent are the same identifier: identifiers store both the declared
+  `scheme`/`value` and a `canonical_scheme`/`canonical_value` (the worker
+  derives `isbn13` for a valid ISBN-10), and matching compares canonical
+  values. Labeled `high_confidence` via `identifier_and_title`.
+- **Path B — content fingerprint.** A `content_sha256` twin whose `title`,
+  `creator`, and **explicit** `language` all AGREE. Labeled
   `high_confidence` via `content_fingerprint_with_bibliographic_agreement`.
-  Conflicting metadata keeps the assets on distinct provisional editions,
-  with the candidate left open for the admin. Assets are never merged or
-  deleted automatically.
-- **Bibliographic**: conservative, versioned, reversible. Confidence
-  labels only (`exact`, `high_confidence`, `candidate`, `unresolved`) —
-  no invented percentages. Auto-link requires ISBN + normalized-title
-  agreement, or title+creator+language agreement; anything else creates a
-  provisional Work/Edition recording method + evidence.
+
+On adoption the incoming asset's identifiers are attached to the adopted
+edition (canonical forms included).
+
+**Work vs Edition.** Title + creator agreement is evidence of the same
+**Work**, never automatically the same **Edition**. Two legitimate editions
+of one work are kept as *Work → Edition A + Edition B*, never collapsed. A
+title+creator match therefore reuses the Work and mints a *distinct
+provisional Edition*; if a sibling edition's strong metadata CONFLICTS
+(e.g. same title+creator+language but ISBN A vs ISBN B), a
+`bibliographic_conflict` `DuplicateCandidate` is opened for review — never
+an auto-merge.
+
+**Provisional contributor identity.** A normalized-name match is evidence
+for future authority resolution, not identity. Absent strong corroborating
+evidence (authority ids — none in metadata yet), every bibliographic credit
+becomes a fresh `Contributor` row; two unrelated "John Smith" credits yield
+two rows. `normalized_name` stays populated for search/candidate matching.
+
+**Filename titles never establish identity.** A missing `dc:title` falls
+back to the filename as a *display* title only (`title_source =
+'filename'`, recorded in evidence + `source_metadata`); it never
+participates in Work/Edition matching, forcing the provisional path.
+
+Confidence is a label only (`exact`, `high_confidence`, `candidate`,
+`unresolved`) — no invented percentages. Anything weaker than Path A/B
+creates a provisional Work/Edition recording method + evidence. Duplicate
+candidates are stored as a **canonical unordered pair**
+(`asset_low_id`/`asset_high_id` with a DB-enforced symmetric unique), so
+`(A,B)` and a reversed/concurrent `(B,A)` converge on one row. Everything
+is versioned and reversible.
 
 ## Queues & operations
 

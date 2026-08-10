@@ -28,6 +28,12 @@ class Contributor extends Model
             ->withTimestamps();
     }
 
+    /**
+     * Deterministic name key. This is MATCHING EVIDENCE (search + future
+     * authority resolution), NEVER a global identity key: two distinct
+     * people may share a normalized name, so rows are never collapsed on
+     * it (the unique constraint was intentionally dropped).
+     */
     public static function normalizeName(string $name): string
     {
         $normalized = class_exists(\Normalizer::class)
