@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Admin\LibraryAdminController;
 use App\Http\Controllers\Admin\ProcessingController;
+use App\Http\Controllers\Admin\RetrievalAdminController;
 use App\Http\Controllers\Admin\SubmissionAdminController;
 use App\Http\Controllers\Admin\SystemSettingsController;
 use App\Http\Controllers\Library\BookDownloadController;
@@ -52,6 +53,9 @@ Route::middleware(['auth'])->group(function () {
         Route::get('submissions', [SubmissionAdminController::class, 'index'])->name('submissions');
         Route::post('submissions/{submission}/approve', [SubmissionAdminController::class, 'approve'])->name('submissions.approve');
         Route::post('submissions/{submission}/reject', [SubmissionAdminController::class, 'reject'])->name('submissions.reject');
+
+        Route::get('retrieval', [RetrievalAdminController::class, 'index'])->name('retrieval');
+        Route::get('retrieval/debugger', [RetrievalAdminController::class, 'debugger'])->name('retrieval.debugger');
 
         Route::get('library', [LibraryAdminController::class, 'index'])->name('library');
         Route::get('library/works/{work}', [LibraryAdminController::class, 'work'])->name('library.work');

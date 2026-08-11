@@ -31,5 +31,12 @@ class AppServiceProvider extends ServiceProvider
                 $request->user()?->id !== null ? 'user:'.$request->user()->id : 'ip:'.$request->ip(),
             );
         });
+
+        // Retrieval search: CPU-bound (embedding + reranking) — bound it.
+        RateLimiter::for('retrieval', function (Request $request) {
+            return Limit::perMinute(30)->by(
+                $request->user()?->id !== null ? 'user:'.$request->user()->id : 'ip:'.$request->ip(),
+            );
+        });
     }
 }

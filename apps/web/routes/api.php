@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\Api\V1\Admin\AdminIngestionRunApiController;
 use App\Http\Controllers\Api\V1\Admin\AdminSubmissionApiController;
+use App\Http\Controllers\Api\V1\RetrievalSearchController;
 use App\Http\Controllers\Api\V1\SubmissionApiController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -30,6 +31,12 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             ->middleware('throttle:submissions')
             ->name('submissions.store');
         Route::get('submissions/{submission}', [SubmissionApiController::class, 'show'])->name('submissions.show');
+
+        Route::post('retrieval/search', [RetrievalSearchController::class, 'search'])
+            ->middleware('throttle:retrieval')
+            ->name('retrieval.search');
+        Route::get('retrieval/chunks/{chunk}/neighbors', [RetrievalSearchController::class, 'neighbors'])
+            ->name('retrieval.neighbors');
 
         Route::middleware('admin')->prefix('admin')->name('admin.')->group(function () {
             Route::get('submissions', [AdminSubmissionApiController::class, 'index'])->name('submissions.index');
