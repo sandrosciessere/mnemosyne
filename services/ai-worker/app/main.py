@@ -10,11 +10,13 @@ import os
 from fastapi import FastAPI, Response
 
 from app.routers.internal_v1 import router as internal_v1_router
+from app.routers.retrieval_v1 import router as retrieval_v1_router
 
 SERVICE_NAME = "mnemosyne-ai-worker"
 
 app = FastAPI(title=SERVICE_NAME, docs_url=None, redoc_url=None, openapi_url=None)
 app.include_router(internal_v1_router)
+app.include_router(retrieval_v1_router)
 
 
 def _enabled_checks() -> list[str]:
