@@ -104,7 +104,14 @@ class IngestionOrchestrator
                 );
             }
 
-            $stage = $run->current_stage ?? IngestionStage::first();
+            // Dispatch the stage the DURABLE checkpoint says comes next, not a
+            // raw current_stage. A run whose current stage already has a
+            // succeeded attempt (e.g. a duplicate that mirrored a failure after
+            // Hash succeeded, or a crash between attempt-success and the
+            // current_stage advance) must resume at the NEXT stage; dispatching
+            // current_stage would be discarded by the executor's checkpoint
+            // guard and wedge the run in `queued` with no job.
+            $stage = $this->nextDispatchStage($run);
 
             $run->forceFill([
                 'status' => IngestionRunStatus::Queued,

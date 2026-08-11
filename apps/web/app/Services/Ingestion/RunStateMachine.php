@@ -113,6 +113,97 @@ class RunStateMachine
                 $asset->forceFill(['ingestion_status' => AssetIngestionStatus::Pending])->save();
             }
         });
+
+        // Cancelling a PRODUCING run must not strand the exact-duplicate runs
+        // parked on its asset: cancelled is terminal but non-mirrorable (the
+        // asset earned no outcome), so unlike markFailed/markSucceeded/
+        // markUnsupported we cannot just mirror it. Instead promote one waiter
+        // to continue the now-orphaned asset; the rest stay parked and are
+        // resolved when that new producer finalizes. No waiter is left queued
+        // on a terminal producer.
+        if ($run->asset !== null) {
+            $this->adoptWaitingDuplicatesAfterProducerGone($run->asset);
+        }
+    }
+
+    /**
+     * A producing run was cancelled, returning its asset to `pending` with no
+     * active producer. Promote the oldest still-active exact-duplicate waiter
+     * to the new producer (adopt the pending asset, resume from its durable
+     * checkpoint — Hash already succeeded on a waiter, so it continues at
+     * validate); the remaining waiters keep waiting on the same asset and are
+     * resolved by `finalizeWaitingDuplicates` when that producer finalizes.
+     *
+     * The claim is a guarded atomic update so exactly one waiter can adopt,
+     * with the one-active-run-per-asset partial unique index as the backstop.
+     * A promoted waiter that itself carries a cancel request is honored at its
+     * next stage boundary, which re-enters markCancelled and promotes the
+     * next waiter — so the chain always terminates with every waiter resolved.
+     */
+    private function adoptWaitingDuplicatesAfterProducerGone(BookAsset $asset): void
+    {
+        $activeStatuses = array_map(fn ($case) => $case->value, IngestionRunStatus::activeCases());
+
+        // If something is already actively producing the asset (e.g. a fresh
+        // submission adopted it in the meantime), the normal waiting/finalize
+        // flow will resolve the waiters — nothing to do here.
+        $hasActiveProducer = $asset->runs()
+            ->whereNotNull('book_asset_id')
+            ->whereIn('status', $activeStatuses)
+            ->exists();
+
+        if ($hasActiveProducer) {
+            return;
+        }
+
+        $waiter = IngestionRun::query()
+            ->where('waiting_on_asset_id', $asset->id)
+            ->whereIn('status', $activeStatuses)
+            ->orderBy('id')
+            ->first();
+
+        if ($waiter === null) {
+            return; // No parked waiters — nothing to promote.
+        }
+
+        $promoted = DB::transaction(function () use ($waiter, $asset, $activeStatuses) {
+            // Atomic claim: only if this run is still an active waiter on the
+            // asset. Zero rows ⇒ another path already moved it; converge.
+            $affected = IngestionRun::query()
+                ->whereKey($waiter->id)
+                ->where('waiting_on_asset_id', $asset->id)
+                ->whereIn('status', $activeStatuses)
+                ->update([
+                    'book_asset_id' => $asset->id,
+                    'waiting_on_asset_id' => null,
+                    'status' => IngestionRunStatus::Queued->value,
+                    'heartbeat_at' => now(),
+                ]);
+
+            if ($affected === 0) {
+                return null;
+            }
+
+            $asset->forceFill(['ingestion_status' => AssetIngestionStatus::Processing])->save();
+
+            $fresh = $waiter->fresh();
+
+            IngestionEvent::record(IngestionEventType::RunQueued, run: $fresh, payload: [
+                'reason' => 'adopted_after_producer_cancelled',
+                'asset' => $asset->public_id,
+            ]);
+
+            return $fresh;
+        });
+
+        if ($promoted === null) {
+            return;
+        }
+
+        // Resume from the durable checkpoint, outside the transaction. Under
+        // global pause this is a no-op and resumeGlobally() re-dispatches it.
+        $orchestrator = app(IngestionOrchestrator::class);
+        $orchestrator->dispatchStage($promoted, $orchestrator->nextDispatchStage($promoted));
     }
 
     /**
@@ -125,7 +216,10 @@ class RunStateMachine
     public function markSucceeded(IngestionRun $run): void
     {
         DB::transaction(function () use ($run) {
-            $warningCount = $run->events()->where('type', 'stage.warning')->count();
+            // Only real content warnings count toward ready-with-warnings;
+            // transient worker-retry notices are operational noise and must
+            // not flip a clean book (same predicate RunPresentation renders).
+            $warningCount = $run->events()->contentWarnings()->count();
 
             $run->forceFill([
                 'status' => IngestionRunStatus::Succeeded,
@@ -176,17 +270,35 @@ class RunStateMachine
      */
     public function parkWaitingDuplicate(IngestionRun $run): void
     {
-        DB::transaction(function () use ($run) {
-            $run->forceFill([
-                'status' => IngestionRunStatus::Queued,
+        // Atomic, guarded transition (never a stale in-memory model write).
+        // Only a run that is STILL an in-flight waiter — running/queued and
+        // still pointing at the asset it parked on — may be moved to the
+        // parked `queued` state. If the producing run finalized this waiter
+        // in the race window (mirrored it to a terminal state and cleared
+        // waiting_on_asset_id), this conditional update affects zero rows and
+        // we leave that terminal outcome intact instead of resurrecting it.
+        $affected = IngestionRun::query()
+            ->whereKey($run->id)
+            ->whereNotNull('waiting_on_asset_id')
+            ->whereIn('status', [
+                IngestionRunStatus::Queued->value,
+                IngestionRunStatus::Running->value,
+            ])
+            ->update([
+                'status' => IngestionRunStatus::Queued->value,
                 'heartbeat_at' => now(),
-            ])->save();
-
-            IngestionEvent::record(IngestionEventType::RunQueued, run: $run, payload: [
-                'reason' => 'waiting_on_existing_asset',
-                'waiting_on_asset_id' => $run->waitingOnAsset?->public_id,
             ]);
-        });
+
+        if ($affected === 0) {
+            return; // Already finalized by the producer — do not resurrect.
+        }
+
+        $run->refresh();
+
+        IngestionEvent::record(IngestionEventType::RunQueued, run: $run, payload: [
+            'reason' => 'waiting_on_existing_asset',
+            'waiting_on_asset_id' => $run->waitingOnAsset?->public_id,
+        ]);
     }
 
     /**
@@ -207,7 +319,9 @@ class RunStateMachine
             return;
         }
 
-        DB::transaction(function () use ($run, $asset) {
+        $mirroredFailure = false;
+
+        DB::transaction(function () use ($run, $asset, &$mirroredFailure) {
             $run->forceFill(['waiting_on_asset_id' => null])->save();
 
             if ($asset->ingestion_status->isReadyForEnrichment()) {
@@ -244,6 +358,7 @@ class RunStateMachine
             }
 
             // Failed (or any other non-ready terminal): mirror the failure.
+            $mirroredFailure = true;
             $run->forceFill([
                 'status' => IngestionRunStatus::Failed,
                 'finished_at' => now(),
@@ -258,9 +373,13 @@ class RunStateMachine
             ]);
         });
 
-        // The duplicate's own incoming copy is never needed — the asset
-        // already exists (or failed). Reclaim it.
-        $this->cleanupIncomingFor($run);
+        // A mirrored FAILURE keeps its incoming copy so an admin retry can
+        // reprocess the content (consistent with markFailed) — the checkpoint
+        // retry resumes at the next stage on the shared asset. Ready and
+        // unsupported are never reprocessed, so their copy is reclaimed.
+        if (! $mirroredFailure) {
+            $this->cleanupIncomingFor($run);
+        }
     }
 
     /**
