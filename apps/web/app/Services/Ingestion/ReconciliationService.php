@@ -385,7 +385,7 @@ class ReconciliationService
      * Classify each evidence dimension for an asset against an existing
      * edition. Missing data on either side is ABSENT — never agreement.
      *
-     * @return array{title: string, creator: string, language: string, identifier: string, publisher_year: string}
+     * @return array{title: string, creator: string, language: string, identifier: string, publisher: string, year: string}
      */
     private function classifyDimensions(array $meta, Edition $edition, ?string $matchTitle, ?string $language): array
     {
@@ -396,7 +396,12 @@ class ReconciliationService
             'creator' => $this->classifyCreator($meta, $edition),
             'language' => $this->classifyLanguage($language, $edition->language),
             'identifier' => $this->classifyIdentifier($meta, $edition),
-            'publisher_year' => $this->classifyPublisherYear($meta, $edition),
+            // Publisher and year are independent bibliographic facts: a real
+            // publisher conflict must not be masked by a missing year (and
+            // vice-versa). Classifying them together as one composite signal
+            // let a present conflict disappear when the other field was absent.
+            'publisher' => $this->classifyPublisher($meta, $edition),
+            'year' => $this->classifyYear($meta, $edition),
         ];
     }
 
@@ -404,6 +409,14 @@ class ReconciliationService
     {
         if ($matchTitle === null || $matchTitle === '') {
             return self::ABSENT; // filename-derived or empty: not identity.
+        }
+
+        // A stored edition whose own title is filename-derived carries no
+        // authoritative title: it is display data only, exactly like the
+        // incoming side. It must never become corroborating title evidence
+        // (nor a hard conflict) — treat it as ABSENT for identity matching.
+        if ((($edition->source_metadata ?? [])['title_source'] ?? 'metadata') === 'filename') {
+            return self::ABSENT;
         }
 
         return $matchTitle === $this->titleKey((string) $edition->title) ? self::AGREE : self::CONFLICT;
@@ -446,20 +459,28 @@ class ReconciliationService
         return array_intersect($assetTokens, $editionTokens) !== [] ? self::AGREE : self::CONFLICT;
     }
 
-    private function classifyPublisherYear(array $meta, Edition $edition): string
+    private function classifyPublisher(array $meta, Edition $edition): string
     {
         $assetPublisher = $this->publisherKey($meta['publisher'] ?? null);
-        $assetYear = $this->extractYear($meta['dates'][0]['value'] ?? $meta['date'] ?? null);
         $editionPublisher = $this->publisherKey($edition->publisher);
-        $editionYear = $edition->publication_year;
 
-        if ($assetPublisher === null || $assetYear === null || $editionPublisher === null || $editionYear === null) {
-            return self::ABSENT;
+        if ($assetPublisher === null || $editionPublisher === null) {
+            return self::ABSENT; // missing on either side is never agreement.
         }
 
-        return ($assetPublisher === $editionPublisher && $assetYear === (int) $editionYear)
-            ? self::AGREE
-            : self::CONFLICT;
+        return $assetPublisher === $editionPublisher ? self::AGREE : self::CONFLICT;
+    }
+
+    private function classifyYear(array $meta, Edition $edition): string
+    {
+        $assetYear = $this->extractYear($meta['dates'][0]['value'] ?? $meta['date'] ?? null);
+        $editionYear = $edition->publication_year;
+
+        if ($assetYear === null || $editionYear === null) {
+            return self::ABSENT; // missing on either side is never agreement.
+        }
+
+        return $assetYear === (int) $editionYear ? self::AGREE : self::CONFLICT;
     }
 
     private function hasConflict(array $dimensions): bool

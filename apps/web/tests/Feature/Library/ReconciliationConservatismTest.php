@@ -225,6 +225,162 @@ class ReconciliationConservatismTest extends TestCase
         $this->assertSame(1, Work::query()->count());
     }
 
+    // M1 — publisher and year are independent facts: a real publisher
+    // conflict must NOT be masked (scored ABSENT) because the year is missing.
+    public function test_publisher_conflict_is_not_masked_by_missing_year(): void
+    {
+        $isbn = '9780000000077';
+        $edition = $this->existingIsbnEdition($isbn, [
+            'publisher' => 'Mondadori',
+            'publication_year' => 2010,
+        ]);
+
+        // Same ISBN + title + creator + language, DIFFERENT publisher, NO year.
+        $asset = $this->reconcileAsset([
+            'title' => 'Shared Title',
+            'creators' => [['name' => 'Sam Writer', 'roles' => ['aut']]],
+            'languages' => ['en'],
+            'publisher' => 'Marsilio',
+            'identifiers' => [['scheme' => 'isbn13', 'value' => $isbn, 'isbn13' => $isbn]],
+        ]);
+
+        $this->assertNotSame(
+            $edition->id,
+            $asset->edition_id,
+            'A real publisher conflict must block adoption even when year is absent.',
+        );
+
+        $candidate = DuplicateCandidate::query()->where('reason', 'bibliographic_conflict')->sole();
+        $this->assertSame('conflict', $candidate->evidence['dimensions']['publisher']);
+        $this->assertSame('absent', $candidate->evidence['dimensions']['year']);
+    }
+
+    // M1 — the inverse: a real year conflict must NOT be masked because the
+    // publisher is missing on one side.
+    public function test_year_conflict_is_not_masked_by_missing_publisher(): void
+    {
+        $isbn = '9780000000078';
+        $edition = $this->existingIsbnEdition($isbn, [
+            'publisher' => null,
+            'publication_year' => 2010,
+        ]);
+
+        // Same ISBN + title + creator + language, NO publisher, DIFFERENT year.
+        $asset = $this->reconcileAsset([
+            'title' => 'Shared Title',
+            'creators' => [['name' => 'Sam Writer', 'roles' => ['aut']]],
+            'languages' => ['en'],
+            'dates' => [['value' => '1999-01-01']],
+            'identifiers' => [['scheme' => 'isbn13', 'value' => $isbn, 'isbn13' => $isbn]],
+        ]);
+
+        $this->assertNotSame($edition->id, $asset->edition_id, 'A real year conflict must block adoption.');
+
+        $candidate = DuplicateCandidate::query()->where('reason', 'bibliographic_conflict')->sole();
+        $this->assertSame('conflict', $candidate->evidence['dimensions']['year']);
+        $this->assertSame('absent', $candidate->evidence['dimensions']['publisher']);
+    }
+
+    // M1 — a missing publisher and an equal year classify independently
+    // (publisher ABSENT, year AGREE) and, with the ISBN + title, still adopt.
+    public function test_missing_publisher_with_equal_year_still_adopts(): void
+    {
+        $isbn = '9780000000079';
+        $edition = $this->existingIsbnEdition($isbn, [
+            'publisher' => 'Adelphi',
+            'publication_year' => 2015,
+        ]);
+
+        $asset = $this->reconcileAsset([
+            'title' => 'Shared Title',
+            'creators' => [['name' => 'Sam Writer', 'roles' => ['aut']]],
+            'languages' => ['en'],
+            // No publisher; year equals the stored 2015.
+            'dates' => [['value' => '2015-06-01']],
+            'identifiers' => [['scheme' => 'isbn13', 'value' => $isbn, 'isbn13' => $isbn]],
+        ]);
+
+        $this->assertSame($edition->id, $asset->edition_id, 'Missing publisher must not fabricate a conflict.');
+        $dims = $asset->reconciliation['evidence']['dimensions'];
+        $this->assertSame('absent', $dims['publisher']);
+        $this->assertSame('agree', $dims['year']);
+    }
+
+    // M2 — a stored Edition whose OWN title is filename-derived must never
+    // become corroborating title evidence for a later real-title asset.
+    public function test_stored_filename_title_is_not_corroborating_evidence(): void
+    {
+        $isbn = '9780000000055';
+
+        // First asset: NO metadata title → the edition is titled from the
+        // filename (title_source=filename) and carries the ISBN.
+        $first = $this->reconcileAsset([
+            'title' => '',
+            'creators' => [['name' => 'Ann Poet', 'roles' => ['aut']]],
+            'languages' => ['en'],
+            'identifiers' => [['scheme' => 'isbn13', 'value' => $isbn, 'isbn13' => $isbn]],
+        ], ['original_filename' => 'collected-poems.epub']);
+
+        $this->assertSame('collected-poems', $first->edition->title);
+        $this->assertSame('filename', $first->edition->source_metadata['title_source']);
+
+        // Second asset: SAME ISBN, a REAL metadata title. The stored
+        // filename title must NOT corroborate identity → no auto-adoption,
+        // and no false hard title conflict is manufactured from filename data.
+        $second = $this->reconcileAsset([
+            'title' => 'Collected Poems',
+            'creators' => [['name' => 'Ann Poet', 'roles' => ['aut']]],
+            'languages' => ['en'],
+            'identifiers' => [['scheme' => 'isbn13', 'value' => $isbn, 'isbn13' => $isbn]],
+        ]);
+
+        $this->assertNotSame(
+            $first->edition_id,
+            $second->edition_id,
+            'A stored filename-derived title must never corroborate identity.',
+        );
+        $this->assertSame(
+            0,
+            DuplicateCandidate::query()->where('reason', 'bibliographic_conflict')->count(),
+            'Filename-derived title data must not manufacture a hard bibliographic conflict.',
+        );
+        // The display title still survives on the stored edition.
+        $this->assertSame('collected-poems', $first->refresh()->edition->title);
+    }
+
+    /** An existing metadata-titled edition carrying a canonical ISBN-13. */
+    private function existingIsbnEdition(string $isbn, array $editionOverrides = []): Edition
+    {
+        $work = Work::factory()->create(['normalized_title' => 'shared title']);
+        $edition = Edition::factory()->create(array_merge([
+            'work_id' => $work->id,
+            'title' => 'Shared Title',
+            'language' => 'en',
+            'source_metadata' => ['title_source' => 'metadata'],
+        ], $editionOverrides));
+
+        $contributor = Contributor::factory()->create([
+            'name' => 'Sam Writer',
+            'normalized_name' => Contributor::normalizeName('Sam Writer'),
+        ]);
+        $edition->contributors()->attach($contributor, [
+            'role' => 'aut', 'credited_as' => 'Sam Writer', 'position' => 0,
+        ]);
+        $edition->identifiers()->create([
+            'scheme' => 'isbn13',
+            'value' => $isbn,
+            'canonical_scheme' => 'isbn13',
+            'canonical_value' => $isbn,
+            'raw_value' => $isbn,
+        ]);
+
+        // A conflict candidate is opened against the asset behind the stored
+        // edition, so the edition must have one (as it would in production).
+        BookAsset::factory()->create(['edition_id' => $edition->id]);
+
+        return $edition;
+    }
+
     // I — the duplicate-candidate pair is symmetric and DB-enforced; a
     // reversed/concurrent creation is ignored, not a crash.
     public function test_duplicate_candidate_pair_is_symmetric_and_db_enforced(): void
