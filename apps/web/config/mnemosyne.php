@@ -118,6 +118,78 @@ return [
     |
     */
 
+    /*
+    |--------------------------------------------------------------------------
+    | Retrieval foundation (Milestone 2)
+    |--------------------------------------------------------------------------
+    |
+    | Component defaults captured into a RetrievalGeneration's immutable
+    | config at creation time. Changing values here affects NEW
+    | generations only — an active generation always uses its snapshot.
+    | Chunk sizing was derived from the real corpus (avg node 427 chars,
+    | p99 ≈ 2000) and the e5-small 512-token context (~1900 chars).
+    |
+    */
+
+    'retrieval' => [
+        'chunker' => [
+            'version' => '1.0.0',
+            'target_chars' => (int) env('MNEMOSYNE_CHUNK_TARGET_CHARS', 1200),
+            'min_chars' => (int) env('MNEMOSYNE_CHUNK_MIN_CHARS', 250),
+            'max_chars' => (int) env('MNEMOSYNE_CHUNK_MAX_CHARS', 2200),
+            'overlap_tail_chars' => (int) env('MNEMOSYNE_CHUNK_OVERLAP_CHARS', 200),
+        ],
+
+        'query_normalization_version' => '1.0.0',
+        'lexical_version' => '1.0.0',
+
+        'embedding' => [
+            'model_key' => env('MNEMOSYNE_EMBEDDING_MODEL_KEY', 'e5-small-v1'),
+            'batch_size' => (int) env('MNEMOSYNE_EMBEDDING_BATCH', 32),
+        ],
+
+        'fusion' => [
+            'algorithm' => 'rrf',
+            'version' => '1.0.0',
+            'k' => (int) env('MNEMOSYNE_RRF_K', 60),
+            'weights' => [
+                'exact' => 2.0,
+                'lexical' => 1.0,
+                'dense' => 1.0,
+            ],
+        ],
+
+        'reranker' => [
+            'model_key' => env('MNEMOSYNE_RERANKER_MODEL_KEY', 'mmarco-mini-v1'),
+            'timeout_seconds' => (int) env('MNEMOSYNE_RERANK_TIMEOUT', 30),
+        ],
+
+        'search' => [
+            // retrieve top N per component → fuse → rerank top M → final K
+            'candidates_per_retriever' => (int) env('MNEMOSYNE_SEARCH_CANDIDATES', 40),
+            'rerank_top_m' => (int) env('MNEMOSYNE_SEARCH_RERANK_M', 24),
+            'max_top_k' => 25,
+            'default_top_k' => 10,
+            'max_query_chars' => 1000,
+            'max_exact_phrase_chars' => 400,
+            // ANN under-return protection: overfetch factor before scope
+            // filtering, plus pgvector iterative scans.
+            'dense_overfetch' => (int) env('MNEMOSYNE_DENSE_OVERFETCH', 4),
+            // Span-overlap ratio above which two candidates are duplicates.
+            'dedupe_overlap_ratio' => 0.6,
+        ],
+
+        'queue' => env('MNEMOSYNE_RETRIEVAL_QUEUE', 'retrieval'),
+        'concurrency' => (int) env('MNEMOSYNE_RETRIEVAL_CONCURRENCY', 2),
+
+        'ann' => [
+            'metric' => 'cosine',
+            'hnsw_m' => (int) env('MNEMOSYNE_HNSW_M', 16),
+            'hnsw_ef_construction' => (int) env('MNEMOSYNE_HNSW_EF_CONSTRUCTION', 64),
+            'hnsw_ef_search' => (int) env('MNEMOSYNE_HNSW_EF_SEARCH', 60),
+        ],
+    ],
+
     'import_sources' => collect(explode(',', (string) env('MNEMOSYNE_IMPORT_SOURCES', '')))
         ->filter(fn ($pair) => str_contains($pair, '='))
         ->mapWithKeys(function ($pair) {
