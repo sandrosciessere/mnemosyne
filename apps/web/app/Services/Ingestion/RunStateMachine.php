@@ -12,7 +12,9 @@ use App\Models\IngestionEvent;
 use App\Models\IngestionRun;
 use App\Models\User;
 use App\Services\Library\LibraryStorage;
+use App\Services\Retrieval\RetrievalIndexer;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * The only place that moves an IngestionRun between statuses. Every
@@ -409,6 +411,21 @@ class RunStateMachine
         if ($submission?->incoming_path !== null) {
             $this->storage->cleanupIncoming($submission);
             $submission->forceFill(['incoming_path' => null])->save();
+        }
+
+        // Loose coupling to Milestone 2: a newly ready asset becomes
+        // retrieval-eligible; the ACTIVE retrieval generation (if any)
+        // enqueues derived indexing. Idempotent; never blocks ingestion.
+        if ($run->asset !== null) {
+            try {
+                app(RetrievalIndexer::class)
+                    ->enqueueForActiveGeneration($run->asset);
+            } catch (\Throwable $exception) {
+                Log::warning('retrieval.enqueue_hook_failed', [
+                    'asset' => $run->asset->public_id,
+                    'error' => $exception->getMessage(),
+                ]);
+            }
         }
     }
 
