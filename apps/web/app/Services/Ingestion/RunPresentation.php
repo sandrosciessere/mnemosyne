@@ -26,8 +26,11 @@ class RunPresentation
      */
     public static function warningsSummary(IngestionRun $run): array
     {
+        // Same authoritative predicate the state machine uses to decide
+        // ready-with-warnings: transient worker-retry notices are excluded so
+        // the summary can never contradict the asset's warning status.
         $events = $run->events()
-            ->where('type', 'stage.warning')
+            ->contentWarnings()
             ->orderBy('id')
             ->limit(500)
             ->get();
@@ -36,10 +39,6 @@ class RunPresentation
 
         foreach ($events as $event) {
             $payload = $event->payload ?? [];
-
-            if (isset($payload['retry_in_seconds'])) {
-                continue; // transient-failure retry notice, not a book warning
-            }
 
             $code = (string) ($payload['code'] ?? 'UNKNOWN');
 

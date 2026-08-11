@@ -245,6 +245,83 @@ class WarningDiagnosticsTest extends TestCase
         }
     }
 
+    /**
+     * Worker that suffers ONE transient blip on the first validate call
+     * (retryable 503), then behaves normally. Optionally emits a real content
+     * warning at normalize so combined cases can be exercised.
+     */
+    private function fakeWorkerWithOneTransientValidateBlip(bool $withRealWarning = false): void
+    {
+        $validateCalls = 0;
+
+        Http::fake(function ($request) use (&$validateCalls, $withRealWarning) {
+            $stage = basename(parse_url($request->url(), PHP_URL_PATH));
+
+            if ($stage === 'validate') {
+                $validateCalls++;
+                if ($validateCalls === 1) {
+                    // Transient worker/infra failure → WorkerUnavailable → retry.
+                    return Http::response(['issues' => [['code' => 'INTERNAL_ERROR']]], 503);
+                }
+            }
+
+            $envelope = $this->happyEnvelopeFor($stage);
+
+            if ($withRealWarning && $stage === 'normalize') {
+                $envelope['status'] = 'passed_with_warnings';
+                $envelope['issues'] = [[
+                    'code' => 'IMAGE_ONLY_CONTENT',
+                    'severity' => 'warning',
+                    'message' => 'spine documents contain images with little or no extractable text',
+                    'overrideable' => true,
+                    'details' => ['hrefs' => ['OEBPS/cover.xhtml'], 'book_level' => false],
+                ]];
+            }
+
+            return Http::response($envelope);
+        });
+    }
+
+    // F4 — a transient worker retry is OPERATIONAL noise, not a book warning:
+    // a clean EPUB that hit one blip must be ready_for_enrichment (NOT
+    // with-warnings) and its warning summary must be empty.
+    public function test_transient_retry_on_clean_epub_is_not_ready_with_warnings(): void
+    {
+        $this->fakeWorkerWithOneTransientValidateBlip();
+        $submission = $this->submitAndDrain('transient-clean-bytes');
+        $run = $submission->latestRun;
+
+        $this->assertSame('succeeded', $run->status->value);
+        $this->assertSame('ready_for_enrichment', $run->asset->ingestion_status->value);
+
+        // The retry DID leave an auditable event, but it is not a content warning.
+        $this->assertGreaterThan(
+            0,
+            $run->events()->where('type', 'stage.warning')->whereNotNull('payload->retry_in_seconds')->count(),
+        );
+
+        $response = $this->actingAs($this->admin)
+            ->get('/admin/library/assets/'.$run->asset->public_id);
+        $this->assertSame([], $response->viewData('page')['props']['warnings_summary']);
+    }
+
+    // F4 — a transient retry alongside a REAL content warning still lands
+    // ready_with_warnings, showing exactly the real warning (retry excluded).
+    public function test_transient_retry_plus_real_warning_shows_only_the_real_warning(): void
+    {
+        $this->fakeWorkerWithOneTransientValidateBlip(withRealWarning: true);
+        $submission = $this->submitAndDrain('transient-plus-warning-bytes');
+        $run = $submission->latestRun;
+
+        $this->assertSame('ready_for_enrichment_with_warnings', $run->asset->ingestion_status->value);
+
+        $response = $this->actingAs($this->admin)->get('/admin/processing/runs/'.$run->public_id);
+        $summary = collect($response->viewData('page')['props']['warnings_summary']);
+
+        $this->assertCount(1, $summary, 'Only the real content warning is surfaced, not the retry.');
+        $this->assertSame('IMAGE_ONLY_CONTENT', $summary->first()['code']);
+    }
+
     public function test_api_run_detail_exposes_derived_presentation(): void
     {
         $this->fakeObfuscatedWorker();

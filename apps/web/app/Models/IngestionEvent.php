@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -12,6 +13,19 @@ class IngestionEvent extends Model
     protected $guarded = ['*'];
 
     protected $fillable = [];
+
+    /**
+     * The single authoritative predicate for a warning event that reflects
+     * an actual book/content condition — as opposed to operational noise
+     * (transient worker/infra failure retries carry `retry_in_seconds`).
+     * Used both to decide the asset's ready(-with-warnings) status and to
+     * build the admin-facing warning summary, so the two can never diverge.
+     */
+    public function scopeContentWarnings(Builder $query): Builder
+    {
+        return $query->where('type', 'stage.warning')
+            ->whereNull('payload->retry_in_seconds');
+    }
 
     protected function casts(): array
     {
