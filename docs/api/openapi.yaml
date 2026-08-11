@@ -95,6 +95,78 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/retrieval/search:
+    post:
+      summary: Ranked evidence retrieval with exact source provenance
+      description: |
+        Searches the ACTIVE retrieval generation across the caller's
+        authorized books (server-side ACL; requesting any inaccessible or
+        unknown asset id fails closed with 403 and no oracle). Modes:
+        `exact` (literal, offset-exact), `lexical` (multilingual FTS),
+        `dense` (semantic), `hybrid` (weighted reciprocal-rank fusion +
+        optional local cross-encoder reranking). Returns evidence, never
+        generated answers. Rate limited (30/min per user).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [query]
+              properties:
+                query: { type: string, minLength: 1, maxLength: 1000 }
+                mode: { type: string, enum: [exact, lexical, dense, hybrid], default: hybrid }
+                scope:
+                  type: object
+                  properties:
+                    book_asset_ids:
+                      type: array
+                      maxItems: 100
+                      items: { type: string, pattern: "^[0-9a-z]{26}$" }
+                top_k: { type: integer, minimum: 1, maximum: 25, default: 10 }
+                rerank: { type: boolean, default: true }
+                case_sensitive: { type: boolean, default: false, description: exact mode only }
+                debug: { type: boolean, default: false, description: score provenance + timings; honored for admins only }
+      responses:
+        "200":
+          description: Ranked evidence
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: "#/components/schemas/RetrievalResult" }
+                  meta:
+                    type: object
+                    properties:
+                      generation: { type: string, description: retrieval generation ULID the query executed against }
+                      mode: { type: string }
+                      skipped_assets:
+                        type: array
+                        description: authorized books NOT indexed in the active generation (never silently partial)
+                        items: { type: string }
+                      reranker_used: { type: boolean }
+                      reranker_fallback_reason: { type: [string, "null"], enum: [worker_unavailable, reranker_error, null] }
+                      dense_unavailable: { type: boolean, description: hybrid degraded — dense component was down }
+                      timings_ms: { type: object, description: per-stage wall times (admin debug only) }
+        "403": { description: "error.code SCOPE_NOT_ACCESSIBLE — scope includes an inaccessible/unknown book" }
+        "409": { description: "error.code NO_ACTIVE_GENERATION" }
+        "422": { $ref: "#/components/responses/ValidationError" }
+        "429": { description: Rate limit exceeded }
+
+  /v1/retrieval/chunks/{id}/neighbors:
+    get:
+      summary: Adjacent context for a retrieved chunk (previous/next)
+      description: Context expansion — separate from ranked evidence. Same asset authorization as search.
+      parameters: [{ $ref: "#/components/parameters/ulid" }]
+      responses:
+        "200":
+          description: Previous/next chunk excerpts with evidence spans (null at book edges)
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/admin/submissions:
     get:
       summary: "[admin] List all submissions"
@@ -345,6 +417,72 @@ components:
               type: string
               enum: [pending, processing, needs_review, failed, ready_for_enrichment, ready_for_enrichment_with_warnings, unsupported]
             epub_version: { type: [string, "null"] }
+
+    EvidenceSpan:
+      type: object
+      description: |
+        Exact provenance of a chunk region. canonical_* are Unicode
+        codepoint offsets into the book's canonical text; utf16_* are
+        UTF-16 code units (JavaScript reader semantics); chunk_* locate
+        the same text inside the chunk excerpt. source_hash detects stale
+        citations across artifact regenerations. Chunk characters covered
+        by no span are synthetic separators — never source evidence.
+      properties:
+        source_node_id: { type: string }
+        spine_index: { type: integer }
+        href: { type: string }
+        fragment: { type: [string, "null"] }
+        node_type: { type: string }
+        heading_path: { type: array, items: { type: string } }
+        canonical_start: { type: integer }
+        canonical_end: { type: integer }
+        utf16_start: { type: integer }
+        utf16_end: { type: integer }
+        chunk_start: { type: integer }
+        chunk_end: { type: integer }
+        source_hash: { type: string }
+
+    RetrievalResult:
+      type: object
+      properties:
+        rank: { type: integer }
+        chunk_id: { type: string, description: ULID }
+        book_asset_id: { type: string, description: ULID }
+        book:
+          type: object
+          properties:
+            title: { type: string }
+            work_title: { type: [string, "null"] }
+        heading_path: { type: array, items: { type: string } }
+        spine_index: { type: integer }
+        excerpt: { type: string, description: source text only (≤700 chars, overlap prefix removed) }
+        excerpt_truncated: { type: boolean }
+        char_count: { type: integer }
+        evidence_spans:
+          type: array
+          items: { $ref: "#/components/schemas/EvidenceSpan" }
+        exact_matches:
+          type: array
+          description: present for exact/hybrid literal hits — offset-exact
+          items:
+            type: object
+            properties:
+              text: { type: string, description: equals the requested literal }
+              chunk_start: { type: integer }
+              chunk_end: { type: integer }
+              canonical_start: { type: [integer, "null"] }
+              canonical_end: { type: [integer, "null"] }
+        scores:
+          type: object
+          description: admin debug only — component provenance; none of these are probabilities
+          properties:
+            exact_rank: { type: [integer, "null"] }
+            lexical_rank: { type: [integer, "null"] }
+            lexical_score: { type: [number, "null"] }
+            dense_rank: { type: [integer, "null"] }
+            dense_similarity: { type: [number, "null"] }
+            rrf_score: { type: [number, "null"] }
+            rerank_score: { type: [number, "null"] }
 
     IngestionRun:
       type: object
