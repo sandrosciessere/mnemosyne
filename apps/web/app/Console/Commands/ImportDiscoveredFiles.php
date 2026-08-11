@@ -317,10 +317,25 @@ class ImportDiscoveredFiles extends Command
     {
         $stored = $retryable ? $error : self::SECURITY_FAILURE_PREFIX.$error;
 
-        $entry->forceFill([
-            'status' => 'import_failed',
-            'error' => mb_substr($stored, 0, 1000),
-        ])->save();
+        // Conditional, atomic transition: only fail an entry still in the
+        // `discovered` state this worker claimed from. If a concurrent worker
+        // already advanced it to `imported`, this update affects zero rows and
+        // we converge on that success instead of clobbering it back to
+        // import_failed — which `--retry-failed` would otherwise re-import,
+        // creating a duplicate submission for an entry that already succeeded.
+        $affected = DiscoveryEntry::query()
+            ->whereKey($entry->id)
+            ->where('status', 'discovered')
+            ->update([
+                'status' => 'import_failed',
+                'error' => mb_substr($stored, 0, 1000),
+            ]);
+
+        if ($affected === 0) {
+            $this->warn("entry {$entry->display_path}: {$error} (ignored — entry already advanced past 'discovered')");
+
+            return;
+        }
 
         $this->warn("entry {$entry->display_path}: {$error}");
     }
