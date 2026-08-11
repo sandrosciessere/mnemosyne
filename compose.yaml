@@ -231,10 +231,14 @@ services:
       WORKER_DATA_PATH: /data
       WORKER_READINESS_CHECKS: storage
       MNEMOSYNE_INTERNAL_TOKEN: mnemosyne-test-token
+      # Retrieval models: reuse the host-provisioned HF cache (read-only
+      # inference; provisioning happens via the prod-side worker).
+      HF_HOME: /models-cache/hf
     ports:
       - "127.0.0.1:${MNEMOSYNE_TEST_WORKER_PORT:-8108}:8000"
     volumes:
       - ${MNEMOSYNE_TEST_DATA_ROOT:-/srv/data/mnemosyne/tmp/e2e-data}:/data
+      - /srv/data/mnemosyne/models:/models-cache
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)\""]
       interval: 5s

@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "description": "Synthetic development benchmark (NOT the future golden set). book_ref values are resolved to assets by the caller; expected.phrase must literally appear in the relevant source text.",
+  "cases": [
+    {
+      "id": "A-exact-compass",
+      "type": "exact",
+      "query": "the meridian brass compass sang at dawn",
+      "expected": { "book_ref": "A", "phrase": "the meridian brass compass sang at dawn" }
+    },
+    {
+      "id": "A-lexical-instruments",
+      "type": "lexical",
+      "query": "brass compass navigator instruments",
+      "expected": { "book_ref": "A", "phrase": "meridian brass compass" }
+    },
+    {
+      "id": "A-semantic-coastlines",
+      "type": "semantic",
+      "query": "charts drawn from remembered coastlines without an atlas",
+      "expected": { "book_ref": "A", "phrase": "memory of shorelines he had walked as a boy" }
+    },
+    {
+      "id": "A-adversarial-compass",
+      "type": "adversarial",
+      "query": "which compass did the navigator trust at sea",
+      "expected": { "book_ref": "A", "phrase": "the meridian brass compass sang at dawn" },
+      "decoy_phrase": "compass of tin into the dough"
+    },
+    {
+      "id": "B-exact-pendolo",
+      "type": "exact",
+      "query": "il pendolo di ottone segnava le ore perdute",
+      "expected": { "book_ref": "B", "phrase": "il pendolo di ottone segnava le ore perdute" }
+    },
+    {
+      "id": "B-lexical-orologiaio",
+      "type": "lexical",
+      "query": "orologiaio meccanismi antichi bottega",
+      "expected": { "book_ref": "B", "phrase": "riparava meccanismi antichi" }
+    },
+    {
+      "id": "B-semantic-artigiano",
+      "type": "semantic",
+      "query": "un artigiano che aggiusta vecchi orologi fermi da anni",
+      "expected": { "book_ref": "B", "phrase": "riparava meccanismi antichi" }
+    },
+    {
+      "id": "B-ambiguous-tempo",
+      "type": "adversarial",
+      "query": "lo scorrere del tempo nel giardino delle ore",
+      "expected": { "book_ref": "B", "phrase": "il pendolo di ottone segnava le ore perdute" },
+      "decoy_phrase": "previsioni del tempo"
+    },
+    {
+      "id": "C-exact-unicode",
+      "type": "exact",
+      "query": "χάρτης της μνήμης 記憶の地図",
+      "expected": { "book_ref": "C", "phrase": "χάρτης της μνήμης 記憶の地図" }
+    },
+    {
+      "id": "C-exact-emoji",
+      "type": "exact",
+      "query": "🌊 the tide answered twice 🌊",
+      "expected": { "book_ref": "C", "phrase": "🌊 the tide answered twice 🌊" }
+    },
+    {
+      "id": "C-exact-boundary",
+      "type": "exact",
+      "query": "marginal note. That note read: the ninth wave",
+      "expected": { "book_ref": "C", "phrase": "the ninth wave carries the ledger home" }
+    },
+    {
+      "id": "C-exact-absent",
+      "type": "exact-absent",
+      "query": "this phrase does not exist anywhere in the corpus",
+      "expected": null
+    }
+  ]
+}
