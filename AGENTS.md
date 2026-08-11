@@ -67,6 +67,60 @@ simplify the architecture toward naive top-k RAG:
   true emergency, explicitly justified). No secrets in the repo, ever.
 - Never touch other projects' services; tests must pass before any push.
 
+## Library & ingestion invariants (do not violate)
+
+The library domain and EPUB pipeline exist (see
+`docs/architecture/epub-ingestion.md`, ADR-007/008/009). Any future work
+must respect:
+
+- `Work` ≠ `Edition` ≠ `BookAsset` — never collapse them; assets may be
+  edition-less only while ingestion is in flight.
+- Laravel owns ALL domain state. The Python worker never writes domain
+  tables and never decides state transitions; it only transforms content
+  behind `/internal/v1` (token-authenticated, data-root-relative paths).
+- Original EPUBs are immutable and content-addressed
+  (`library/original/sha256/aa/bb/{sha}.epub`); nothing ever edits or
+  deletes them. Exact dedup is by file SHA-256 — never store a second
+  copy of the same bytes.
+- A content-fingerprint match (`content_sha256`) creates a duplicate
+  CANDIDATE for admins — never an automatic destructive merge, and
+  **never Edition identity by itself**: automatic Edition linking
+  requires independent bibliographic corroboration (title + creator
+  agreement) and is labeled, evidenced and reversible.
+- A contributor's normalized name is a matching hint, never an identity
+  key: homonyms must remain distinct rows (no unique constraint on
+  normalized names).
+- The identity hierarchy is strict — no layer may treat evidence as
+  identity more aggressively than the layer beneath it allows.
+  **BookAsset** identity = exact SHA-256 (physical duplicate) only.
+  **Contributor** identity is never a normalized-name string.
+  **Work** identity: a normalized title + an *unresolved* creator string
+  is matching evidence, NEVER sufficient identity — do not auto-reuse a
+  Work on that alone (it would re-introduce homonym collapse one level
+  up); such siblings become a review candidate. Auto Work reuse requires a
+  strong signal (an existing Edition reached via canonical identifier, or a
+  corroborated content-fingerprint twin). **Edition** auto-adoption
+  requires corroboration AND the absence of any conflicting strong metadata
+  (ISBN/publisher+year/language). Prefer a duplicate provisional Work over
+  a wrong automatic merge; false negatives are reconciled later, silent
+  false-positive identity contaminates the knowledge base.
+- Filesystem discovery is READ-ONLY over the source library and writes
+  only its persistent manifest; creating submissions/copies is the
+  separate, restart-safe import step.
+- Every ingestion stage must stay idempotent and record its handler
+  version in the stage attempt; artifacts are versioned per
+  `pipeline_version` and written atomically (temp + rename).
+- Source references (spine index, source href, fragment, ordinal,
+  heading path, stable node id) must survive every future transformation
+  — chunking/retrieval that drops them breaks citation-readiness.
+- Hard security validation blocks (zip traversal, bombs, symlinks, XXE)
+  are NEVER overrideable — not by admins, not by code. DRM is never
+  bypassed.
+- Status columns are strings + PHP enums (no PG enum types); public
+  identifiers are ULIDs — never expose numeric ids in routes or APIs.
+- Test fixtures: synthetic EPUBs only. No copyrighted EPUB may ever
+  enter the repository.
+
 ## Shared server — safety rules (non-negotiable)
 
 This is a shared host (`shde-ed837.serverlet.com`) running other projects

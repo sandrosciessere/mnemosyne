@@ -3,10 +3,16 @@
 AI-powered library analysis, retrieval and research platform for a large
 private EPUB collection (target scale: hundreds of thousands of books).
 
-**Project status: application bootstrap.** Authentication, roles, health
-endpoints, the containerized stack and the AI-worker skeleton are in place.
-The library domain, ingestion state machine and retrieval engine are not
-implemented yet.
+**Project status: library domain + EPUB ingestion.** Authentication,
+roles, health endpoints and the containerized stack are in place, plus:
+the bibliographic domain (Work → Edition → BookAsset), the submission /
+approval workflow, a versioned five-stage ingestion pipeline
+(hash → validate → parse → normalize → structure, ending in
+READY_FOR_ENRICHMENT), safe EPUB 2/3 parsing in the Python worker,
+exact + content deduplication, the admin processing control plane and
+the `/api/v1` submission/admin API (`docs/api/openapi.yaml`,
+`docs/architecture/epub-ingestion.md`). Semantic enrichment (embeddings,
+retrieval, analysis) is not implemented yet.
 
 - Staging URL: https://mnemosyne.shellrent.com
 - License: not yet selected.
@@ -62,8 +68,9 @@ Public self-registration is disabled by design.
 
 ```bash
 make up / make down / make ps / make logs
-make test        # PHP suite (host, sqlite in-memory) + Python suite
-make lint        # pint, eslint + prettier, ruff
+make test              # PHP suite (host, sqlite in-memory) + Python suite
+make lint              # pint, eslint + prettier, ruff (check-only)
+make test-integration  # PostgreSQL + real-worker E2E (compose profile "test")
 ```
 
 ## Data directory

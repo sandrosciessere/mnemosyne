@@ -6,10 +6,9 @@
 
         <title inertia>{{ config('app.name', 'Laravel') }}</title>
 
-        <link rel="preconnect" href="https://fonts.bunny.net">
-        <link href="https://fonts.bunny.net/css?family=instrument-sans:400,500,600" rel="stylesheet" />
-
-        @routes
+        {{-- No external fonts and no inline scripts: the public vhost
+             serves a strict CSP (default-src 'self', script-src 'self').
+             Routes ship inside the bundle (resources/js/ziggy.js). --}}
         @viteReactRefresh
         @vite(['resources/js/app.tsx', "resources/js/pages/{$page['component']}.tsx"])
         @inertiaHead
