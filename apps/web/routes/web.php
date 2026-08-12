@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\Admin\AnswerInspectorController;
 use App\Http\Controllers\Admin\LibraryAdminController;
 use App\Http\Controllers\Admin\ProcessingController;
 use App\Http\Controllers\Admin\RetrievalAdminController;
@@ -7,6 +8,8 @@ use App\Http\Controllers\Admin\SubmissionAdminController;
 use App\Http\Controllers\Admin\SystemSettingsController;
 use App\Http\Controllers\Library\BookDownloadController;
 use App\Http\Controllers\Library\LibraryController;
+use App\Http\Controllers\Library\ReaderController;
+use App\Http\Controllers\Library\SearchController;
 use App\Http\Controllers\Library\SubmissionController;
 use Illuminate\Support\Facades\Route;
 use Inertia\Inertia;
@@ -17,12 +20,14 @@ Route::get('/', function () {
 
 Route::middleware(['auth'])->group(function () {
     Route::get('dashboard', fn () => Inertia::render('dashboard'))->name('dashboard');
-    Route::get('search', fn () => Inertia::render('search'))->name('search');
+    Route::get('search', [SearchController::class, 'index'])->name('search');
     Route::get('analyses', fn () => Inertia::render('analyses'))->name('analyses');
 
     Route::get('library', [LibraryController::class, 'index'])->name('library');
     Route::get('library/books/{asset}/download', BookDownloadController::class)
         ->name('library.books.download');
+    Route::get('library/books/{asset}/reader', [ReaderController::class, 'show'])
+        ->name('library.books.reader');
 
     Route::get('library/submissions', [SubmissionController::class, 'index'])
         ->name('library.submissions.index');
@@ -56,6 +61,9 @@ Route::middleware(['auth'])->group(function () {
 
         Route::get('retrieval', [RetrievalAdminController::class, 'index'])->name('retrieval');
         Route::get('retrieval/debugger', [RetrievalAdminController::class, 'debugger'])->name('retrieval.debugger');
+
+        Route::get('answers', [AnswerInspectorController::class, 'index'])->name('answers');
+        Route::get('answers/{answer}', [AnswerInspectorController::class, 'show'])->name('answers.show');
 
         Route::get('library', [LibraryAdminController::class, 'index'])->name('library');
         Route::get('library/works/{work}', [LibraryAdminController::class, 'work'])->name('library.work');
