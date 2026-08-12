@@ -132,22 +132,30 @@ class RetrievalLexicalFallbackTest extends IntegrationTestCase
 
         $this->assertSame('or_fallback', $outcome['strategy']);
 
-        $rankOf = function (string $needle) use ($outcome): ?int {
+        $find = function (string $needle) use ($outcome): ?array {
             foreach ($outcome['candidates'] as $candidate) {
                 if (str_contains($candidate['chunk']->source_text, $needle)) {
-                    return $candidate['rank'];
+                    return ['rank' => $candidate['rank'], 'chunk_id' => $candidate['chunk']->id];
                 }
             }
 
             return null;
         };
 
-        $target = $rankOf('riparava meccanismi antichi');
-        $decoy = $rankOf('previsioni del tempo');
+        $target = $find('riparava meccanismi antichi');
+        $decoy = $find('previsioni del tempo');
 
         $this->assertNotNull($target);
-        if ($decoy !== null) {
-            $this->assertLessThan($decoy, $target, 'multi-term evidence must outrank the single-term decoy');
+
+        // The two sentences are adjacent source nodes, so chunking may
+        // place them in one chunk — the comparison is only meaningful
+        // when the decoy surfaces as a DIFFERENT chunk.
+        if ($decoy !== null && $decoy['chunk_id'] !== $target['chunk_id']) {
+            $this->assertLessThan(
+                $decoy['rank'],
+                $target['rank'],
+                'multi-term evidence must outrank the single-term decoy',
+            );
         }
     }
 
