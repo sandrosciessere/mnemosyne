@@ -46,6 +46,6 @@ class GroundedAnswerEvidence extends Model
             'grounded_answer_claim_evidence',
             'grounded_answer_evidence_id',
             'grounded_answer_claim_id',
-        );
+        )->withPivot('atoms');
     }
 }

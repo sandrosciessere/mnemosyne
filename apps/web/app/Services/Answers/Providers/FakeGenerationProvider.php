@@ -15,7 +15,7 @@ class FakeGenerationProvider implements GenerationProvider
     /** @var list<array|\Throwable> */
     private array $script = [];
 
-    /** @var list<array{question: string, packet: EvidencePacket, context: ?string, repair: ?string}> */
+    /** @var list<array{question: string, packet: EvidencePacket, context: ?string, repair: ?string, language: string, subquestions: array}> */
     public array $calls = [];
 
     public function __construct(private readonly GeneratorOutputValidator $validator)
@@ -31,9 +31,16 @@ class FakeGenerationProvider implements GenerationProvider
         $this->script[] = $output;
     }
 
-    public function generate(string $question, EvidencePacket $packet, ?string $conversationContext, ?string $repairFeedback): GenerationResult
+    public function generate(GenerationRequest $request): GenerationResult
     {
-        $this->calls[] = ['question' => $question, 'packet' => $packet, 'context' => $conversationContext, 'repair' => $repairFeedback];
+        $this->calls[] = [
+            'question' => $request->question,
+            'packet' => $request->packet,
+            'context' => $request->conversationContext,
+            'repair' => $request->repairFeedback,
+            'language' => $request->languageName,
+            'subquestions' => $request->subquestions,
+        ];
 
         if ($this->script === []) {
             throw new \RuntimeException('FakeGenerationProvider has no scripted output left.');
@@ -47,8 +54,9 @@ class FakeGenerationProvider implements GenerationProvider
 
         return $this->validator->validate(
             $next,
-            $packet,
+            $request->packet,
             (int) config('mnemosyne.answers.generator.max_claims'),
+            $request->subquestionKeys(),
         );
     }
 

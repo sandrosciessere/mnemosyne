@@ -15,5 +15,6 @@ class GeneratedClaimDraft
         public readonly string $text,
         public readonly string $suggestedLabel,
         public readonly array $evidenceKeys,
+        public readonly ?string $subquestion = null,
     ) {}
 }

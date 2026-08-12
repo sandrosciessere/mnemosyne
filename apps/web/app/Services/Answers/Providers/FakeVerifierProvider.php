@@ -45,7 +45,7 @@ class FakeVerifierProvider implements VerifierProvider
             $scripted = [
                 'claim_key' => $claim->claimKey,
                 'support_level' => 'direct',
-                'supported_evidence_keys' => $claim->evidenceKeys,
+                'supported_atom_keys' => array_map(fn ($key) => $key.'.S1', $claim->evidenceKeys),
                 'reason_code' => 'DIRECTLY_STATED',
             ];
         }

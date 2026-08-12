@@ -21,10 +21,11 @@ class GeneratorOutputValidator
 
     /**
      * @param  array  $raw  decoded provider JSON
+     * @param  list<string>  $subquestionKeys  allowed SQ keys ([] = simple question)
      *
      * @throws ProviderInvalidOutputException with GENERATOR_INVALID_OUTPUT
      */
-    public function validate(array $raw, EvidencePacket $packet, int $maxClaims): GenerationResult
+    public function validate(array $raw, EvidencePacket $packet, int $maxClaims, array $subquestionKeys = []): GenerationResult
     {
         $status = $raw['status'] ?? null;
 
@@ -103,7 +104,17 @@ class GeneratorOutputValidator
                 }
             }
 
-            $drafts[] = new GeneratedClaimDraft($key, trim($text), $label, $keys);
+            $subquestion = null;
+
+            if ($subquestionKeys !== []) {
+                $subquestion = $claim['subquestion'] ?? null;
+
+                if (! is_string($subquestion) || ! in_array($subquestion, $subquestionKeys, true)) {
+                    $this->reject('claim must carry a valid subquestion key');
+                }
+            }
+
+            $drafts[] = new GeneratedClaimDraft($key, trim($text), $label, $keys, $subquestion);
         }
 
         return new GenerationResult($status, $drafts);

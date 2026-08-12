@@ -14,6 +14,21 @@ export interface ClaimData {
     label: ClaimLabel | null;
     label_user: string | null;
     citations: number[];
+    /** Key of the subquestion this claim answers (compound questions only). */
+    subquestion: string | null;
+}
+
+/** Minimal verified span inside a citation excerpt (canonical codepoint offsets). */
+export interface CitationSpan {
+    canonical_start: number;
+    canonical_end: number;
+}
+
+/** One subquestion of a decomposed compound question. Text is UNTRUSTED model output. */
+export interface SubquestionData {
+    key: string;
+    text: string;
+    status: 'pending' | 'answered' | 'unanswered';
 }
 
 /** One numbered citation resolving to a durable evidence snapshot. Excerpt is UNTRUSTED book text. */
@@ -33,6 +48,8 @@ export interface CitationData {
     canonical_start: number;
     canonical_end: number;
     excerpt: string;
+    /** Minimal verified spans inside the excerpt (canonical codepoint offsets). */
+    spans: CitationSpan[];
     stale: boolean;
     stale_reason: string | null;
 }
@@ -47,6 +64,12 @@ export interface AnswerData {
     intent: string | null;
     capability_notice: string | null;
     retrieval_expanded: boolean;
+    /** BCP-47-ish language the answer is written in, when detected. */
+    response_language: string | null;
+    /** Persisted backend total duration; set only on terminal states. */
+    duration_ms: number | null;
+    /** Decomposed subquestions (compound questions only). */
+    subquestions: SubquestionData[] | null;
     claims: ClaimData[];
     rejected_claim_count: number;
     citations: CitationData[];
@@ -85,6 +108,8 @@ export interface AnswerDiagnostics {
     classifier_version: string | null;
     retrieval_profile_version: string | null;
     unitizer_version: string | null;
+    decomposer_version: string | null;
+    claim_gate_version: string | null;
     generator: {
         provider: string | null;
         model: string | null;
@@ -120,6 +145,11 @@ export interface AdminClaimAudit {
     verifier_support_level: string | null;
     verifier_reason_code: string | null;
     evidence_keys: string[];
+    claim_type: string | null;
+    subquestion_key: string | null;
+    gate_result: 'passed' | 'rejected' | null;
+    gate_reason_code: string | null;
+    support_atoms: string[];
 }
 
 /** Evidence packet unit; citation number is null for uncited units. */

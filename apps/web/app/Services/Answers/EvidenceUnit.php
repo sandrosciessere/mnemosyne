@@ -38,6 +38,16 @@ class EvidenceUnit
         public array $retrievalMeta,
     ) {}
 
+    /**
+     * Deterministic citeable source atoms (sentence-level) inside this
+     * unit, keyed S1..Sn. Computed once by the unitizer; the model may
+     * only reference these IDs — the application owns every coordinate.
+     *
+     * @var array<string, array{key: string, canonical_start: int, canonical_end: int,
+     *                          utf16_start: int, utf16_end: int, text: string}>
+     */
+    public array $atoms = [];
+
     /** Overlap-dedupe identity: same canonical evidence appears once. */
     public function identity(): string
     {

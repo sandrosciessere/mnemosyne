@@ -2,8 +2,6 @@
 
 namespace App\Services\Answers\Providers;
 
-use App\Services\Answers\EvidencePacket;
-
 /**
  * Provider-independent structured claim generation. Implementations
  * normalize vendor formats into GenerationResult and vendor failures
@@ -12,7 +10,7 @@ use App\Services\Answers\EvidencePacket;
  */
 interface GenerationProvider
 {
-    public function generate(string $question, EvidencePacket $packet, ?string $conversationContext, ?string $repairFeedback): GenerationResult;
+    public function generate(GenerationRequest $request): GenerationResult;
 
     public function identity(): ProviderIdentity;
 }

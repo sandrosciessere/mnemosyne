@@ -169,13 +169,30 @@ trait BuildsAnswerFixtures
         return ['status' => $status, 'claims' => $claims];
     }
 
-    protected function claim(string $key, string $text, array $evidenceKeys, string $label = 'textual_fact'): array
+    protected function claim(string $key, string $text, array $evidenceKeys, string $label = 'textual_fact', ?string $subquestion = null): array
     {
-        return ['claim_key' => $key, 'text' => $text, 'suggested_label' => $label, 'evidence_keys' => $evidenceKeys];
+        $claim = ['claim_key' => $key, 'text' => $text, 'suggested_label' => $label, 'evidence_keys' => $evidenceKeys];
+
+        if ($subquestion !== null) {
+            $claim['subquestion'] = $subquestion;
+        }
+
+        return $claim;
     }
 
+    /**
+     * Verifier verdict helper. `$keys` are sentence-atom keys
+     * ("E3.S2"); bare unit keys ("E3") are auto-qualified to their
+     * first atom for convenience in tests that don't care which
+     * sentence supports the claim.
+     */
     protected function verdict(string $claimKey, string $level, array $keys, string $reason = 'DIRECTLY_STATED'): array
     {
-        return ['claim_key' => $claimKey, 'support_level' => $level, 'supported_evidence_keys' => $keys, 'reason_code' => $reason];
+        $atomKeys = array_map(
+            fn (string $key) => str_contains($key, '.') ? $key : $key.'.S1',
+            $keys,
+        );
+
+        return ['claim_key' => $claimKey, 'support_level' => $level, 'supported_atom_keys' => $atomKeys, 'reason_code' => $reason];
     }
 }

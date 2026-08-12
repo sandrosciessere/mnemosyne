@@ -737,7 +737,20 @@ components:
         capability_notice:
           type: [string, "null"]
           description: "Set for intents beyond honest M3 coverage (e.g. LIMITED_GLOBAL_SUMMARY_SUPPORT): the answer is bounded evidence, not full-book analysis"
-        retrieval_expanded: { type: boolean, description: whether the single bounded retrieval expansion ran }
+        retrieval_expanded: { type: boolean, description: whether the single bounded (subquestion-focused) retrieval expansion ran }
+        response_language: { type: [string, "null"], description: "Answer language (follows the question: it/en/es/fr/de)" }
+        duration_ms:
+          type: [integer, "null"]
+          description: Persisted backend execution time (set on terminal states; operational metadata, NOT a confidence signal)
+        subquestions:
+          type: [array, "null"]
+          description: Bounded decomposition of compound questions (max 4); unanswered parts are explicit — never fabricated
+          items:
+            type: object
+            properties:
+              key: { type: string, description: "SQ1, SQ2, ..." }
+              text: { type: string }
+              status: { type: string, enum: [pending, answered, unanswered] }
         claims:
           type: array
           items: { $ref: "#/components/schemas/AnswerClaim" }
@@ -770,6 +783,7 @@ components:
           enum: [textual_fact, strong_inference, interpretation, conflict, null]
           description: Final epistemic label DECIDED BY THE VERIFIER
         label_user: { type: [string, "null"], description: "Italian user label: Fatto testuale / Deduzione forte / Interpretazione / Contraddizione rilevata" }
+        subquestion: { type: [string, "null"], description: subquestion this claim answers (compound questions) }
         citations:
           type: array
           items: { type: integer }
@@ -797,6 +811,14 @@ components:
         canonical_start: { type: integer, description: codepoint offset in canonical source }
         canonical_end: { type: integer }
         excerpt: { type: string, description: EXACT bounded canonical slice (original source language — never translated) }
+        spans:
+          type: array
+          description: Minimal verified CitationSpans (sentence atoms selected by the verifier and confirmed by the application gate) inside the evidence excerpt; the reader highlights THESE, not the whole unit
+          items:
+            type: object
+            properties:
+              canonical_start: { type: integer }
+              canonical_end: { type: integer }
         stale: { type: boolean, description: fail-closed staleness against the CURRENT source }
         stale_reason:
           type: [string, "null"]

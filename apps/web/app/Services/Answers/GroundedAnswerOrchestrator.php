@@ -18,34 +18,42 @@ use App\Models\GroundedAnswerRun;
 use App\Services\Answers\Providers\AnswerPromptBuilder;
 use App\Services\Answers\Providers\AnswerProviderFactory;
 use App\Services\Answers\Providers\GeneratedClaimDraft;
+use App\Services\Answers\Providers\GenerationRequest;
 use App\Services\Answers\Providers\GenerationResult;
 use App\Services\Answers\Providers\VerificationResult;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
- * The grounded answer pipeline:
+ * The grounded answer pipeline (verifier-precision revision):
  *
- *   classify → retrieval policy → EvidencePacket (+ at most ONE bounded
- *   expansion) → structured generation (+ at most one repair) →
- *   independent per-claim verification → final epistemic labels →
- *   server-side citations → persistence.
+ *   classify → decompose (bounded) → retrieval policy → EvidencePacket
+ *   (per-subquestion for compound questions, + at most ONE bounded and
+ *   FOCUSED expansion) → structured generation (+ one repair) →
+ *   independent per-claim STRICT-ENTAILMENT verification (sentence
+ *   atoms) → deterministic ClaimEvidenceGate → final epistemic labels →
+ *   per-subquestion coverage → server-side citations → persistence.
  *
  * Correctness invariants owned here:
- * - generator output is NEVER published unverified (verifier failure =
- *   pipeline failure, not a fallback);
- * - a claim the verifier scored `none` is rejected and never displayed
- *   as supported;
- * - citation numbers are assigned server-side by first appearance;
- * - conversation history is referential context only — previous
- *   assistant prose is NEVER included, so it can never become evidence.
+ * - generator output is NEVER published unverified;
+ * - the model verifier is NOT trusted alone: the application gate can
+ *   reject a verifier-positive claim (verifier_positive/gate_rejected
+ *   is auditable), and rejected claims are never displayed;
+ * - unsupported subquestions surface as an honest partial answer —
+ *   evidence for one part never manufactures an answer for another;
+ * - citation numbers are server-assigned by first appearance, and every
+ *   citation records the minimal verified CitationSpan atoms;
+ * - conversation history is referential context only.
  */
 class GroundedAnswerOrchestrator
 {
     public function __construct(
         private readonly QueryIntentClassifier $classifier,
+        private readonly QuestionDecomposer $decomposer,
+        private readonly ResponseLanguageDetector $language,
         private readonly RetrievalPolicyResolver $policies,
         private readonly EvidencePacketBuilder $packets,
+        private readonly ClaimEvidenceGate $gate,
         private readonly AnswerProviderFactory $providers,
     ) {}
 
@@ -75,11 +83,30 @@ class GroundedAnswerOrchestrator
         $pipelineStart = hrtime(true);
         $config = config('mnemosyne.answers');
 
-        // ── Classification ─────────────────────────────────────────
+        // ── Classification + decomposition + language ──────────────
         $t = hrtime(true);
         $assetIds = $run->scopeAssets()->pluck('book_assets.id')->all();
         $intent = $this->classifier->classify($run->question, count($assetIds));
+        $subquestions = $this->decomposer->decompose($run->question);
+        $isCompound = count($subquestions) > 1;
+        $languageCode = $this->language->detect($run->question);
         $policy = $this->policies->resolve($intent, count($assetIds));
+
+        // A compound question whose parts include an identity/reveal
+        // part inherits the capability notice from the strictest part.
+        $capabilityNotice = $intent->capabilityNotice();
+
+        if ($isCompound && $capabilityNotice === null) {
+            foreach ($subquestions as $subquestion) {
+                $subIntent = $this->classifier->classify($subquestion['text'], count($assetIds));
+
+                if ($subIntent->capabilityNotice() !== null) {
+                    $capabilityNotice = $subIntent->capabilityNotice();
+                    break;
+                }
+            }
+        }
+
         $timings['classification'] = $this->ms($t);
 
         $run->forceFill([
@@ -87,25 +114,39 @@ class GroundedAnswerOrchestrator
             'started_at' => now(),
             'classified_intent' => $intent,
             'query_classifier_version' => QueryIntentClassifier::VERSION,
-            'capability_notice' => $intent->capabilityNotice(),
+            'capability_notice' => $capabilityNotice,
             'retrieval_profile_version' => RetrievalPolicyResolver::VERSION,
             'evidence_unitizer_version' => EvidenceUnitizer::VERSION,
             'generator_prompt_version' => AnswerPromptBuilder::GENERATOR_PROMPT_VERSION,
             'verifier_prompt_version' => AnswerPromptBuilder::VERIFIER_PROMPT_VERSION,
+            'question_decomposer_version' => QuestionDecomposer::VERSION,
+            'claim_gate_version' => ClaimEvidenceGate::VERSION,
+            'response_language' => $languageCode,
+            'subquestions' => $isCompound
+                ? array_map(fn ($sq) => $sq + ['status' => 'pending'], $subquestions)
+                : null,
         ])->save();
 
-        // ── Retrieval + packet (with one bounded expansion) ────────
+        // ── Retrieval + packet (one bounded, FOCUSED expansion) ─────
         $t = hrtime(true);
         $generation = $run->generation;
-        $packet = $this->packets->build($generation, $assetIds, $run->question, $policy);
+
+        $packet = $isCompound
+            ? $this->packets->buildForSubquestions($generation, $assetIds, $subquestions, $policy)
+            : $this->packets->build($generation, $assetIds, $run->question, $policy);
         $timings['retrieval_and_packet'] = $this->ms($t);
         $timings['retrieval'] = $this->searchMs($packet);
 
-        if ($packet->unitCount() < (int) $config['evidence']['min_sufficient_units']) {
+        $minUnits = (int) $config['evidence']['min_sufficient_units'];
+        $expansionTarget = $this->expansionTarget($packet, $subquestions, $isCompound, $minUnits);
+
+        if ($expansionTarget !== null) {
             $run->forceFill(['status' => AnswerRunStatus::ExpandingRetrieval])->save();
 
             $t = hrtime(true);
-            $expandedPacket = $this->packets->build($generation, $assetIds, $run->question, $policy, expanded: true);
+            $expandedPacket = $isCompound
+                ? $this->packets->buildForSubquestions($generation, $assetIds, $subquestions, $policy, [$expansionTarget])
+                : $this->packets->build($generation, $assetIds, $run->question, $policy, expanded: true);
             $timings['retrieval_expansion'] = $this->ms($t);
 
             if ($expandedPacket->unitCount() > $packet->unitCount()) {
@@ -119,7 +160,7 @@ class GroundedAnswerOrchestrator
         $this->persistEvidence($run, $packet);
         $run->forceFill([
             'evidence_stats' => $packet->stats,
-            'retrieval_diagnostics' => $packet->diagnostics,
+            'retrieval_diagnostics' => $packet->diagnostics + ($expansionTarget !== null ? ['expansion_target' => $expansionTarget] : []),
         ])->save();
         $timings['evidence_persistence'] = $this->ms($t);
 
@@ -139,10 +180,16 @@ class GroundedAnswerOrchestrator
             'generator_revision' => $generatorIdentity->revision,
         ])->save();
 
-        $context = $this->conversationContext($run);
+        $request = new GenerationRequest(
+            question: $run->question,
+            packet: $packet,
+            conversationContext: $this->conversationContext($run),
+            languageName: $this->language->promptName($languageCode),
+            subquestions: $isCompound ? $subquestions : [],
+        );
 
         $t = hrtime(true);
-        $generated = $this->generateWithRepair($run, $packet, $context, $generator);
+        $generated = $this->generateWithRepair($run, $request, $generator);
         $timings['generation'] = $this->ms($t);
 
         if ($generated->status === 'insufficient_evidence' || $generated->claims === []) {
@@ -151,7 +198,7 @@ class GroundedAnswerOrchestrator
             return;
         }
 
-        // ── Independent verification (per claim) ───────────────────
+        // ── Independent verification + application gate ────────────
         $verifier = $this->providers->verifier();
         $verifierIdentity = $verifier->identity();
         $run->forceFill([
@@ -163,21 +210,25 @@ class GroundedAnswerOrchestrator
 
         $t = hrtime(true);
         $verdicts = [];
+        $gateResults = [];
+        $gateMs = 0.0;
 
         foreach ($generated->claims as $claim) {
             $verdicts[$claim->claimKey] = $this->verifyWithRetry($run, $packet, $claim, $verifier);
-        }
-        $timings['verification'] = $this->ms($t);
 
-        // ── Final labels + citations + persistence ─────────────────
+            $g = hrtime(true);
+            $gateResults[$claim->claimKey] = $this->gate->evaluate($claim, $verdicts[$claim->claimKey], $packet);
+            $gateMs += $this->ms($g);
+        }
+        $timings['claim_gate'] = round($gateMs, 1);
+        $timings['verification'] = $this->ms($t) - $timings['claim_gate'];
+
+        // ── Labels + coverage + citations + persistence ────────────
         $t = hrtime(true);
-        $outcome = $this->persistClaims($run, $generated, $verdicts);
+        $outcome = $this->persistClaims($run, $packet, $generated, $verdicts, $gateResults, $subquestions, $isCompound);
         $timings['claim_persistence'] = $this->ms($t);
 
         if ($outcome === null) {
-            // Every claim was rejected by the verifier: honest
-            // insufficient-evidence terminal state (audit keeps the
-            // rejected claims).
             $this->finishInsufficient($run, $timings, $pipelineStart);
 
             return;
@@ -194,18 +245,39 @@ class GroundedAnswerOrchestrator
         ])->save();
     }
 
+    /**
+     * The single bounded expansion is FOCUSED: for compound questions
+     * it targets the first subquestion whose packet share is too thin
+     * instead of blindly raising the global Top-K.
+     */
+    private function expansionTarget(EvidencePacket $packet, array $subquestions, bool $isCompound, int $minUnits): ?string
+    {
+        if (! $isCompound) {
+            return $packet->unitCount() < $minUnits ? 'ALL' : null;
+        }
+
+        $perSubquestion = $packet->stats['per_subquestion'] ?? [];
+
+        foreach ($subquestions as $subquestion) {
+            if (($perSubquestion[$subquestion['key']] ?? 0) < max(1, intdiv($minUnits, 2))) {
+                return $subquestion['key'];
+            }
+        }
+
+        return null;
+    }
+
     private function generateWithRepair(
         GroundedAnswerRun $run,
-        EvidencePacket $packet,
-        ?string $context,
+        GenerationRequest $request,
         Providers\GenerationProvider $generator,
     ): GenerationResult {
         try {
-            return $generator->generate($run->question, $packet, $context, null);
+            return $generator->generate($request);
         } catch (ProviderInvalidOutputException $exception) {
             Log::info('answers.generator_repair', ['run' => $run->public_id, 'reason' => $exception->getMessage()]);
 
-            return $generator->generate($run->question, $packet, $context, $exception->getMessage());
+            return $generator->generate($request->withRepairFeedback($exception->getMessage()));
         }
     }
 
@@ -270,30 +342,40 @@ class GroundedAnswerOrchestrator
     }
 
     /**
-     * Maps verifier verdicts to final labels, persists claims + the
-     * claim↔evidence relation, and assigns server-side citation numbers
-     * by first appearance across VERIFIED claims.
+     * Final labels (verifier verdict AND application gate), citation
+     * numbering by first appearance, CitationSpan atoms on the
+     * claim↔evidence relation, per-subquestion coverage.
      *
      * @param  array<string, VerificationResult>  $verdicts
-     * @return AnswerOutcome|null null when no claim survived verification
+     * @param  array<string, array{result: string, reason: ?string, claim_type: string}>  $gateResults
+     * @return AnswerOutcome|null null when no claim survived
      */
-    private function persistClaims(GroundedAnswerRun $run, GenerationResult $generated, array $verdicts): ?AnswerOutcome
-    {
+    private function persistClaims(
+        GroundedAnswerRun $run,
+        EvidencePacket $packet,
+        GenerationResult $generated,
+        array $verdicts,
+        array $gateResults,
+        array $subquestions,
+        bool $isCompound,
+    ): ?AnswerOutcome {
         $evidenceByKey = GroundedAnswerEvidence::query()
             ->where('grounded_answer_run_id', $run->id)
             ->get()
             ->keyBy('evidence_key');
 
-        return DB::transaction(function () use ($run, $generated, $verdicts, $evidenceByKey) {
+        return DB::transaction(function () use ($run, $packet, $generated, $verdicts, $gateResults, $evidenceByKey, $subquestions, $isCompound) {
             $citationCounter = 0;
             $anyRejected = false;
             $verifiedCount = 0;
+            $answeredSubquestions = [];
 
             foreach ($generated->claims as $ordinal => $draft) {
                 $verdict = $verdicts[$draft->claimKey];
+                $gateResult = $gateResults[$draft->claimKey];
                 $level = VerifierSupportLevel::from($verdict->supportLevel);
                 $finalLabel = $level->toEpistemicLabel();
-                $verified = $finalLabel !== null;
+                $verified = $finalLabel !== null && $gateResult['result'] === 'passed';
 
                 $claim = new GroundedAnswerClaim;
                 $claim->forceFill([
@@ -301,13 +383,17 @@ class GroundedAnswerOrchestrator
                     'ordinal' => $ordinal,
                     'claim_key' => $draft->claimKey,
                     'claim_text' => $draft->text,
+                    'claim_type' => $gateResult['claim_type'],
+                    'subquestion_key' => $draft->subquestion,
                     'generator_suggested_label' => $draft->suggestedLabel,
-                    'final_label' => $finalLabel?->value,
+                    'final_label' => $verified ? $finalLabel->value : null,
                     'verification_status' => $verified
                         ? ClaimVerificationStatus::Verified
                         : ClaimVerificationStatus::Rejected,
                     'verifier_support_level' => $verdict->supportLevel,
                     'verifier_reason_code' => $verdict->reasonCode,
+                    'gate_result' => $gateResult['result'],
+                    'gate_reason_code' => $gateResult['reason'],
                 ])->save();
 
                 if (! $verified) {
@@ -318,8 +404,17 @@ class GroundedAnswerOrchestrator
 
                 $verifiedCount++;
 
-                // The verifier's evidence selection is authoritative.
-                $evidenceIds = [];
+                if ($draft->subquestion !== null) {
+                    $answeredSubquestions[$draft->subquestion] = true;
+                }
+
+                // Attach evidence with the minimal verified atom spans.
+                $atomsByUnit = [];
+
+                foreach ($verdict->supportedAtomKeys as $atomKey) {
+                    $unitKey = EvidencePacket::unitKeyOf($atomKey);
+                    $atomsByUnit[$unitKey][] = $atomKey;
+                }
 
                 foreach ($verdict->supportedEvidenceKeys as $key) {
                     $evidence = $evidenceByKey->get($key);
@@ -332,20 +427,77 @@ class GroundedAnswerOrchestrator
                         $evidence->forceFill(['citation_number' => ++$citationCounter])->save();
                     }
 
-                    $evidenceIds[] = $evidence->id;
+                    $claim->evidence()->attach($evidence->id, [
+                        'atoms' => json_encode($this->atomSpans($packet, $atomsByUnit[$key] ?? [])),
+                    ]);
                 }
-
-                $claim->evidence()->attach($evidenceIds);
             }
 
             if ($verifiedCount === 0) {
+                if ($isCompound) {
+                    $this->persistSubquestionCoverage($run, $subquestions, []);
+                }
+
                 return null;
+            }
+
+            if ($isCompound) {
+                $this->persistSubquestionCoverage($run, $subquestions, $answeredSubquestions);
+
+                $unanswered = count(array_filter(
+                    $subquestions,
+                    fn ($sq) => ! isset($answeredSubquestions[$sq['key']]),
+                ));
+
+                if ($unanswered > 0) {
+                    return AnswerOutcome::PartiallyAnswered;
+                }
             }
 
             return ($generated->status === 'partially_answered' || $anyRejected)
                 ? AnswerOutcome::PartiallyAnswered
                 : AnswerOutcome::Answered;
         });
+    }
+
+    /**
+     * Minimal verified CitationSpans: absolute canonical/UTF-16 offsets
+     * of the selected atoms (text is derivable from the evidence
+     * excerpt via offsets — not duplicated).
+     *
+     * @param  list<string>  $atomKeys
+     * @return list<array{key: string, canonical_start: int, canonical_end: int, utf16_start: int, utf16_end: int}>
+     */
+    private function atomSpans(EvidencePacket $packet, array $atomKeys): array
+    {
+        $spans = [];
+
+        foreach ($atomKeys as $atomKey) {
+            $atom = $packet->atom($atomKey);
+
+            if ($atom !== null) {
+                $spans[] = [
+                    'key' => $atomKey,
+                    'canonical_start' => $atom['canonical_start'],
+                    'canonical_end' => $atom['canonical_end'],
+                    'utf16_start' => $atom['utf16_start'],
+                    'utf16_end' => $atom['utf16_end'],
+                ];
+            }
+        }
+
+        return $spans;
+    }
+
+    private function persistSubquestionCoverage(GroundedAnswerRun $run, array $subquestions, array $answered): void
+    {
+        $run->forceFill([
+            'subquestions' => array_map(fn ($sq) => [
+                'key' => $sq['key'],
+                'text' => $sq['text'],
+                'status' => isset($answered[$sq['key']]) ? 'answered' : 'unanswered',
+            ], $subquestions),
+        ])->save();
     }
 
     /**

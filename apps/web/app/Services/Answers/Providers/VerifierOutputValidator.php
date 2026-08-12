@@ -7,10 +7,11 @@ use App\Exceptions\Answers\ProviderInvalidOutputException;
 use App\Services\Answers\EvidencePacket;
 
 /**
- * Application-level validation of verifier output. The verifier may
- * select any keys FROM THE PACKET (it can choose better evidence than
- * the generator proposed) but can never invent keys or support a claim
- * with zero evidence.
+ * Application-level validation of verifier output. The verifier must
+ * point at exact SENTENCE ATOMS (E3.S2) that exist in the packet — it
+ * may choose different/better atoms than the generator proposed but
+ * can never invent identifiers, cite whole units vaguely, or support a
+ * claim with zero atoms.
  */
 class VerifierOutputValidator
 {
@@ -29,28 +30,37 @@ class VerifierOutputValidator
             $this->reject('claim_key mismatch');
         }
 
-        $keys = $raw['supported_evidence_keys'] ?? null;
+        $atomKeys = $raw['supported_atom_keys'] ?? null;
 
-        if (! is_array($keys)) {
-            $this->reject('supported_evidence_keys must be an array');
+        if (! is_array($atomKeys)) {
+            $this->reject('supported_atom_keys must be an array');
         }
 
-        $keys = array_values(array_unique($keys));
+        $atomKeys = array_values(array_unique($atomKeys));
+        $evidenceKeys = [];
 
-        foreach ($keys as $key) {
-            if (! is_string($key) || ! $packet->has($key)) {
-                $this->reject('unknown evidence key '.(is_string($key) ? $key : gettype($key)));
+        foreach ($atomKeys as $atomKey) {
+            if (! is_string($atomKey) || ! $packet->hasAtom($atomKey)) {
+                $this->reject('unknown support atom '.(is_string($atomKey) ? $atomKey : gettype($atomKey)));
             }
+
+            $evidenceKeys[] = EvidencePacket::unitKeyOf($atomKey);
         }
 
-        if ($keys === [] && in_array($level, ['direct', 'strong', 'interpretive', 'conflict'], true)) {
-            $this->reject('a supported/conflict verdict requires evidence keys');
+        if ($atomKeys === [] && in_array($level, ['direct', 'strong', 'interpretive', 'conflict'], true)) {
+            $this->reject('a supported/conflict verdict requires support atoms');
         }
 
         $reason = $raw['reason_code'] ?? null;
         $reason = is_string($reason) ? mb_substr(trim($reason), 0, 64) : null;
 
-        return new VerificationResult($claim->claimKey, $level, $keys, $reason === '' ? null : $reason);
+        return new VerificationResult(
+            $claim->claimKey,
+            $level,
+            $atomKeys,
+            array_values(array_unique($evidenceKeys)),
+            $reason === '' ? null : $reason,
+        );
     }
 
     private function reject(string $reason): never

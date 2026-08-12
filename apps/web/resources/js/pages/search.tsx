@@ -81,6 +81,32 @@ function isTerminal(status: AnswerStatus): boolean {
     return status === 'ready' || status === 'insufficient' || status === 'failed';
 }
 
+/** Format a persisted backend duration: <1 min → "42 s"; else "3 min 28 s". */
+function formatDuration(durationMs: number): string {
+    const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+    if (totalSeconds < 60) {
+        return `${totalSeconds} s`;
+    }
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes} min ${seconds} s`;
+}
+
+/**
+ * Operational metadata footer (elapsed time). Rendered visually separate
+ * from the epistemic label badges: duration must never read as confidence.
+ */
+function AnswerDurationFooter({ durationMs }: { durationMs: number | null }) {
+    if (durationMs === null) {
+        return null;
+    }
+    return (
+        <p className="border-sidebar-border/70 dark:border-sidebar-border text-muted-foreground border-t pt-3 text-xs">
+            Completata in {formatDuration(durationMs)}
+        </p>
+    );
+}
+
 /** One rendered turn of the conversation: a question bubble or an answer card. */
 type Entry =
     | { kind: 'question'; key: string; text: string }
@@ -217,6 +243,89 @@ function ClaimItem({ answerId, claim }: { answerId: string; claim: ClaimData }) 
     );
 }
 
+/**
+ * Verified claims list. For compound questions (subquestions present) claims
+ * carrying a subquestion key are grouped under small muted subquestion headers.
+ */
+function ClaimsList({ answer }: { answer: AnswerData }) {
+    const subquestions = answer.subquestions;
+    const grouped = subquestions !== null && answer.claims.some((claim) => claim.subquestion !== null);
+
+    if (!grouped) {
+        return (
+            <ul className="space-y-3" aria-label="Affermazioni verificate">
+                {answer.claims.map((claim) => (
+                    <ClaimItem key={claim.key} answerId={answer.id} claim={claim} />
+                ))}
+            </ul>
+        );
+    }
+
+    const byKey = new Map<string, ClaimData[]>();
+    const ungrouped: ClaimData[] = [];
+    for (const claim of answer.claims) {
+        const subquestion = claim.subquestion !== null ? (subquestions?.find((entry) => entry.key === claim.subquestion) ?? null) : null;
+        if (subquestion === null) {
+            ungrouped.push(claim);
+        } else {
+            const list = byKey.get(subquestion.key) ?? [];
+            list.push(claim);
+            byKey.set(subquestion.key, list);
+        }
+    }
+
+    return (
+        <div className="space-y-4" aria-label="Affermazioni verificate">
+            {(subquestions ?? []).map((subquestion) => {
+                const claims = byKey.get(subquestion.key) ?? [];
+                if (claims.length === 0) {
+                    return null;
+                }
+                return (
+                    <div key={subquestion.key}>
+                        <h4 className="text-muted-foreground mb-2 text-xs font-medium whitespace-pre-line">{subquestion.text}</h4>
+                        <ul className="space-y-3">
+                            {claims.map((claim) => (
+                                <ClaimItem key={claim.key} answerId={answer.id} claim={claim} />
+                            ))}
+                        </ul>
+                    </div>
+                );
+            })}
+            {ungrouped.length > 0 && (
+                <ul className="space-y-3">
+                    {ungrouped.map((claim) => (
+                        <ClaimItem key={claim.key} answerId={answer.id} claim={claim} />
+                    ))}
+                </ul>
+            )}
+        </div>
+    );
+}
+
+/** Amber block listing subquestions without sufficient evidence (partial answers). */
+function UnansweredSubquestions({ answer }: { answer: AnswerData }) {
+    const unanswered = (answer.subquestions ?? []).filter((subquestion) => subquestion.status === 'unanswered');
+    if (unanswered.length === 0) {
+        return null;
+    }
+    return (
+        <div className="rounded-md border border-amber-300 p-3 dark:border-amber-800">
+            <p className="text-sm font-medium">Evidenza insufficiente</p>
+            <p className="text-muted-foreground mt-1 text-sm">
+                Le seguenti parti della domanda non hanno evidenza sufficiente nei passaggi disponibili:
+            </p>
+            <ul className="mt-2 list-disc space-y-1 pl-5">
+                {unanswered.map((subquestion) => (
+                    <li key={subquestion.key} className="text-sm whitespace-pre-line">
+                        {subquestion.text}
+                    </li>
+                ))}
+            </ul>
+        </div>
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Sources panel — durable citation snapshots with reader deep links.
 // ---------------------------------------------------------------------------
@@ -242,6 +351,7 @@ function SourceItem({ answerId, citation }: { answerId: string; citation: Citati
             <blockquote className="border-sidebar-border/70 dark:border-sidebar-border text-muted-foreground mt-2 border-l-2 pl-3 text-sm whitespace-pre-line italic">
                 {citation.excerpt}
             </blockquote>
+            {citation.spans.length > 0 && <p className="text-muted-foreground mt-1 text-xs">Evidenza puntuale evidenziata nel libro.</p>}
             {readerLinkable ? (
                 <Button asChild variant="outline" size="sm" className="mt-2">
                     <Link href={`/library/books/${citation.book_asset_id}/reader?answer=${answerId}&evidence=${citation.evidence_key}`}>
@@ -262,13 +372,16 @@ function SourceItem({ answerId, citation }: { answerId: string; citation: Citati
 function AnswerCard({ answer }: { answer: AnswerData }) {
     if (answer.status === 'failed') {
         return (
-            <Alert variant="destructive">
-                <AlertTriangle aria-hidden="true" className="size-4" />
-                <AlertTitle>
-                    La risposta non è stata completata{answer.error_code ? <span className="font-mono"> ({answer.error_code})</span> : null}
-                </AlertTitle>
-                <AlertDescription>Si è verificato un errore durante l'elaborazione. Riprova più tardi.</AlertDescription>
-            </Alert>
+            <div className="space-y-2">
+                <Alert variant="destructive">
+                    <AlertTriangle aria-hidden="true" className="size-4" />
+                    <AlertTitle>
+                        La risposta non è stata completata{answer.error_code ? <span className="font-mono"> ({answer.error_code})</span> : null}
+                    </AlertTitle>
+                    <AlertDescription>Si è verificato un errore durante l'elaborazione. Riprova più tardi.</AlertDescription>
+                </Alert>
+                {answer.duration_ms !== null && <p className="text-muted-foreground text-xs">Completata in {formatDuration(answer.duration_ms)}</p>}
+            </div>
         );
     }
 
@@ -326,12 +439,10 @@ function AnswerCard({ answer }: { answer: AnswerData }) {
                         {answer.claims.length === 0 ? (
                             <p className="text-muted-foreground text-sm">Nessuna affermazione verificata disponibile.</p>
                         ) : (
-                            <ul className="space-y-3" aria-label="Affermazioni verificate">
-                                {answer.claims.map((claim) => (
-                                    <ClaimItem key={claim.key} answerId={answer.id} claim={claim} />
-                                ))}
-                            </ul>
+                            <ClaimsList answer={answer} />
                         )}
+
+                        <UnansweredSubquestions answer={answer} />
                     </>
                 )}
 
@@ -347,6 +458,8 @@ function AnswerCard({ answer }: { answer: AnswerData }) {
                         </ol>
                     </div>
                 )}
+
+                <AnswerDurationFooter durationMs={answer.duration_ms} />
             </CardContent>
         </Card>
     );

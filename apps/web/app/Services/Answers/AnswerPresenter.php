@@ -51,9 +51,34 @@ class AnswerPresenter
                 'text' => $claim->claim_text,
                 'label' => $claim->final_label?->value,
                 'label_user' => $claim->final_label?->userLabel(),
+                'subquestion' => $claim->subquestion_key,
                 'citations' => $numbers,
             ];
         }
+
+        // Minimal verified CitationSpans per citation (union across the
+        // claims citing each unit), for transparency + precise reader
+        // highlighting.
+        $spansByEvidenceId = [];
+
+        foreach ($run->claims as $claim) {
+            foreach ($claim->evidence as $evidence) {
+                $atoms = json_decode((string) ($evidence->pivot->atoms ?? '[]'), true) ?: [];
+
+                foreach ($atoms as $atom) {
+                    $spansByEvidenceId[$evidence->id][$atom['key']] = [
+                        'canonical_start' => $atom['canonical_start'],
+                        'canonical_end' => $atom['canonical_end'],
+                    ];
+                }
+            }
+        }
+
+        foreach ($citations as &$citation) {
+            $evidenceId = $run->evidence->firstWhere('evidence_key', $citation['evidence_key'])?->id;
+            $citation['spans'] = array_values($spansByEvidenceId[$evidenceId] ?? []);
+        }
+        unset($citation);
 
         $data = [
             'id' => $run->public_id,
@@ -64,6 +89,11 @@ class AnswerPresenter
             'intent' => $run->classified_intent?->value,
             'capability_notice' => $run->capability_notice,
             'retrieval_expanded' => $run->retrieval_expansion_count > 0,
+            'response_language' => $run->response_language,
+            'duration_ms' => isset($run->timings_ms['total']) && $run->status->isTerminal()
+                ? (int) $run->timings_ms['total']
+                : null,
+            'subquestions' => $run->subquestions,
             'claims' => $claims,
             'rejected_claim_count' => $rejectedCount,
             'citations' => $citations,
@@ -82,6 +112,8 @@ class AnswerPresenter
                 'classifier_version' => $run->query_classifier_version,
                 'retrieval_profile_version' => $run->retrieval_profile_version,
                 'unitizer_version' => $run->evidence_unitizer_version,
+                'decomposer_version' => $run->question_decomposer_version,
+                'claim_gate_version' => $run->claim_gate_version,
                 'generator' => [
                     'provider' => $run->generator_provider,
                     'model' => $run->generator_model,

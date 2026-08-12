@@ -12,7 +12,15 @@ use App\Enums\QueryIntent;
  */
 class QueryIntentClassifier
 {
-    public const VERSION = 'query-intent 1.0.0';
+    /**
+     * 1.1.0: hidden-identity / revelation questions ("chi prende la sua
+     * identità", "chi è realmente", "chi si rivela") classify as
+     * TRICKY_INFERENCE — they usually need evidence beyond a bounded
+     * Top-K window, so M3 answers them with an explicit capability
+     * notice and only what bounded evidence supports. Never guess the
+     * reveal.
+     */
+    public const VERSION = 'query-intent 1.1.0';
 
     /**
      * @param  int  $scopeSize  number of books selected for this answer
@@ -57,6 +65,14 @@ class QueryIntentClassifier
             'implicitamente', 'sottinteso', 'sottintende', 'tra le righe', 'lascia intendere',
             'si può dedurre', 'si puo dedurre', 'cosa suggerisce indirettamente',
             'senza dirlo', 'imply', 'implied', 'between the lines', 'indirectly suggest',
+            // Hidden-identity / revelation / impersonation questions.
+            'vera identità', 'vera identita', 'identità nascosta', 'identita nascosta',
+            'chi è realmente', 'chi e realmente', 'chi è veramente', 'chi e veramente',
+            'si rivela', 'si rivelerà', 'scambio di persona', "assume l'identità",
+            "assume l'identita", 'prende la sua identità', 'prende la sua identita',
+            "prende l'identità", "prende l'identita", 'si nasconde dietro', 'si finge',
+            'true identity', 'hidden identity', 'who really is', 'who is really',
+            'assumes the identity', 'takes over the identity', 'impersonat',
         ])) {
             return QueryIntent::TrickyInference;
         }

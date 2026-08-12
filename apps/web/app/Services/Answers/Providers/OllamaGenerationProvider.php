@@ -3,7 +3,6 @@
 namespace App\Services\Answers\Providers;
 
 use App\Exceptions\Answers\ProviderUnavailableException;
-use App\Services\Answers\EvidencePacket;
 
 /**
  * Local Ollama structured-generation adapter. One bounded retry on
@@ -22,19 +21,26 @@ class OllamaGenerationProvider implements GenerationProvider
         private readonly array $config,
     ) {}
 
-    public function generate(string $question, EvidencePacket $packet, ?string $conversationContext, ?string $repairFeedback): GenerationResult
+    public function generate(GenerationRequest $request): GenerationResult
     {
+        $subquestionKeys = $request->subquestionKeys();
+
         $messages = [
             ['role' => 'system', 'content' => $this->prompts->systemPreamble()],
-            ['role' => 'user', 'content' => $this->prompts->evidenceBlock($packet)
-                ."\n".$this->prompts->contextBlock($conversationContext)
-                .$this->prompts->generatorInstruction($question, $repairFeedback)],
+            ['role' => 'user', 'content' => $this->prompts->evidenceBlock($request->packet)
+                ."\n".$this->prompts->contextBlock($request->conversationContext)
+                .$this->prompts->generatorInstruction(
+                    $request->question,
+                    $request->languageName,
+                    $request->subquestions,
+                    $request->repairFeedback,
+                )],
         ];
 
         $maxClaims = (int) $this->config['max_claims'];
-        $raw = $this->callWithRetry($messages, $maxClaims);
+        $raw = $this->callWithRetry($messages, $maxClaims, $subquestionKeys !== []);
 
-        return $this->validator->validate($raw, $packet, $maxClaims);
+        return $this->validator->validate($raw, $request->packet, $maxClaims, $subquestionKeys);
     }
 
     public function identity(): ProviderIdentity
@@ -44,7 +50,7 @@ class OllamaGenerationProvider implements GenerationProvider
         return new ProviderIdentity('ollama', (string) $this->config['model'], $this->digest);
     }
 
-    private function callWithRetry(array $messages, int $maxClaims): array
+    private function callWithRetry(array $messages, int $maxClaims, bool $withSubquestions = false): array
     {
         $attempts = 1 + max(0, (int) $this->config['max_retries']);
         $lastException = null;
@@ -54,7 +60,7 @@ class OllamaGenerationProvider implements GenerationProvider
                 return $this->client->chatJson(
                     (string) $this->config['model'],
                     $messages,
-                    $this->prompts->generatorSchema($maxClaims),
+                    $this->prompts->generatorSchema($maxClaims, $withSubquestions),
                     (int) $this->config['timeout_seconds'],
                     (int) $this->config['num_ctx'],
                     (int) $this->config['max_output_tokens'],

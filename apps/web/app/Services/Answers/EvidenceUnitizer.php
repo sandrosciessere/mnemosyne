@@ -20,7 +20,12 @@ use App\Services\Retrieval\Chunker;
  */
 class EvidenceUnitizer
 {
-    public const VERSION = 'evidence-unitizer 1.0.0';
+    /**
+     * 1.1.0 adds deterministic sentence-level source atoms (S1..Sn)
+     * inside each unit: the minimal citeable CitationSpans the verifier
+     * must select from. Unit semantics are unchanged from 1.0.0.
+     */
+    public const VERSION = 'evidence-unitizer 1.1.0';
 
     public function __construct(private readonly int $unitMaxChars) {}
 
@@ -67,10 +72,54 @@ class EvidenceUnitizer
                         'span_ordinal' => $span->span_ordinal,
                     ],
                 );
+
+                $this->atomize($units[count($units) - 1]);
             }
         }
 
         return $units;
+    }
+
+    /**
+     * Splits a unit into deterministic sentence atoms with exact
+     * absolute coordinates. Atoms partition the unit text losslessly;
+     * whitespace stays attached to the preceding sentence so offsets
+     * remain exact. Sentence-level is the smallest RELIABLE
+     * deterministic span (clause-level precision is not worth wrong
+     * offsets: correctness > tiny highlights).
+     */
+    public function atomize(EvidenceUnit $unit): void
+    {
+        $pieces = preg_split(
+            '/(?<=[.!?…])(?=\s)|(?<=[.!?…]["»”\'])(?=\s)/u',
+            $unit->text,
+            -1,
+            PREG_SPLIT_NO_EMPTY,
+        ) ?: [$unit->text];
+
+        $offset = 0;
+        $ordinal = 0;
+
+        foreach ($pieces as $piece) {
+            $length = mb_strlen($piece);
+
+            if (trim($piece) !== '') {
+                $ordinal++;
+                $key = 'S'.$ordinal;
+                $utf16Offset = Chunker::utf16Length(mb_substr($unit->text, 0, $offset));
+
+                $unit->atoms[$key] = [
+                    'key' => $key,
+                    'canonical_start' => $unit->canonicalStart + $offset,
+                    'canonical_end' => $unit->canonicalStart + $offset + $length,
+                    'utf16_start' => $unit->utf16Start + $utf16Offset,
+                    'utf16_end' => $unit->utf16Start + $utf16Offset + Chunker::utf16Length($piece),
+                    'text' => $piece,
+                ];
+            }
+
+            $offset += $length;
+        }
     }
 
     /**

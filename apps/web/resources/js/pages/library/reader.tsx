@@ -53,9 +53,18 @@ interface ReaderProps {
     answer_id: string | null;
 }
 
+/**
+ * A highlight range with its unique DOM id. Several highlights can share one
+ * evidence_key (one per minimal citation span), so the id carries a document
+ * -order occurrence suffix: `evidence-<key>-<n>`.
+ */
+interface AnnotatedHighlight extends ReaderHighlight {
+    dom_id: string;
+}
+
 interface Segment {
     text: string;
-    evidenceKey: string | null;
+    domId: string | null;
 }
 
 /**
@@ -64,7 +73,7 @@ interface Segment {
  * never overlap by contract, but clamp defensively so a malformed range
  * can never duplicate or drop text.
  */
-function segmentNodeText(text: string, ranges: ReaderHighlight[]): Segment[] {
+function segmentNodeText(text: string, ranges: AnnotatedHighlight[]): Segment[] {
     const sorted = [...ranges].sort((a, b) => a.utf16_start - b.utf16_start);
     const segments: Segment[] = [];
     let cursor = 0;
@@ -73,28 +82,28 @@ function segmentNodeText(text: string, ranges: ReaderHighlight[]): Segment[] {
         const start = Math.min(Math.max(range.utf16_start, cursor), text.length);
         const end = Math.min(Math.max(range.utf16_end, start), text.length);
         if (start > cursor) {
-            segments.push({ text: text.slice(cursor, start), evidenceKey: null });
+            segments.push({ text: text.slice(cursor, start), domId: null });
         }
         if (end > start) {
-            segments.push({ text: text.slice(start, end), evidenceKey: range.evidence_key });
+            segments.push({ text: text.slice(start, end), domId: range.dom_id });
         }
         cursor = Math.max(cursor, end);
     }
     if (cursor < text.length) {
-        segments.push({ text: text.slice(cursor), evidenceKey: null });
+        segments.push({ text: text.slice(cursor), domId: null });
     }
     return segments;
 }
 
-function NodeText({ node, highlights }: { node: ReaderNode; highlights: ReaderHighlight[] }) {
+function NodeText({ node, highlights }: { node: ReaderNode; highlights: AnnotatedHighlight[] }) {
     if (highlights.length === 0) {
         return <>{node.text}</>;
     }
     return (
         <>
             {segmentNodeText(node.text, highlights).map((segment, index) =>
-                segment.evidenceKey !== null ? (
-                    <mark key={index} id={`evidence-${segment.evidenceKey}`} className="rounded bg-yellow-200 px-0.5 dark:bg-yellow-700/60">
+                segment.domId !== null ? (
+                    <mark key={index} id={segment.domId} className="rounded bg-yellow-200 px-0.5 dark:bg-yellow-700/60">
                         {segment.text}
                     </mark>
                 ) : (
@@ -105,7 +114,7 @@ function NodeText({ node, highlights }: { node: ReaderNode; highlights: ReaderHi
     );
 }
 
-function ReaderNodeView({ node, highlights }: { node: ReaderNode; highlights: ReaderHighlight[] }) {
+function ReaderNodeView({ node, highlights }: { node: ReaderNode; highlights: AnnotatedHighlight[] }) {
     const content = <NodeText node={node} highlights={highlights} />;
 
     switch (node.type) {
@@ -161,21 +170,42 @@ export default function Reader({ asset, sections, current_section, highlights, s
         return `/library/books/${asset.public_id}/reader?${query.toString()}`;
     };
 
-    const highlightsByNode = new Map<string, ReaderHighlight[]>();
+    // Group highlights per node and assign each one a unique DOM id in
+    // document order: an evidence key can have several minimal spans, so the
+    // id gets a per-key occurrence suffix (`evidence-<key>-0`, `-1`, …).
+    const rawByNode = new Map<string, ReaderHighlight[]>();
     for (const highlight of highlights) {
-        const list = highlightsByNode.get(highlight.node_id) ?? [];
+        const list = rawByNode.get(highlight.node_id) ?? [];
         list.push(highlight);
-        highlightsByNode.set(highlight.node_id, list);
+        rawByNode.set(highlight.node_id, list);
+    }
+    const highlightsByNode = new Map<string, AnnotatedHighlight[]>();
+    const occurrenceByKey = new Map<string, number>();
+    for (const node of current_section.nodes) {
+        const list = rawByNode.get(node.id);
+        if (list === undefined) {
+            continue;
+        }
+        const sorted = [...list].sort((a, b) => a.utf16_start - b.utf16_start);
+        highlightsByNode.set(
+            node.id,
+            sorted.map((highlight) => {
+                const occurrence = occurrenceByKey.get(highlight.evidence_key) ?? 0;
+                occurrenceByKey.set(highlight.evidence_key, occurrence + 1);
+                return { ...highlight, dom_id: `evidence-${highlight.evidence_key}-${occurrence}` };
+            }),
+        );
     }
 
     const firstEvidenceKey = highlights[0]?.evidence_key ?? null;
 
-    // Scroll the first highlighted evidence into view once the section is mounted.
+    // Scroll the FIRST mark (document order) of the deep-linked evidence into
+    // view once the section is mounted.
     useEffect(() => {
         if (firstEvidenceKey === null) {
             return;
         }
-        document.getElementById(`evidence-${firstEvidenceKey}`)?.scrollIntoView({ block: 'center' });
+        document.getElementById(`evidence-${firstEvidenceKey}-0`)?.scrollIntoView({ block: 'center' });
     }, [firstEvidenceKey, current_section.spine_index]);
 
     const backToAnswer = () => {

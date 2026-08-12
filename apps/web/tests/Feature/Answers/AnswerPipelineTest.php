@@ -40,13 +40,15 @@ class AnswerPipelineTest extends TestCase
 
         // The fake echoes a two-claim answer; both claims share E1 and
         // the second adds E2 → citation numbers must be assigned by
-        // first appearance and REUSED across claims.
+        // first appearance and REUSED across claims. CL2 is a
+        // non-atomic inference with two independent atoms (the gate
+        // requires >= 2 independent sources for strong claims).
         $generator->scriptOutput($this->generatorAnswer([
             $this->claim('CL1', 'I pescatori rientravano sani e salvi quando la lanterna era accesa.', ['E1']),
-            $this->claim('CL2', 'La lanterna era il segnale di sicurezza del borgo.', ['E1', 'E2'], 'strong_inference'),
+            $this->claim('CL2', 'I pescatori si affidavano alla lanterna per rientrare.', ['E1', 'E2'], 'strong_inference'),
         ]));
         $verifier->scriptFor('CL1', $this->verdict('CL1', 'direct', ['E1']));
-        $verifier->scriptFor('CL2', $this->verdict('CL2', 'strong', ['E1', 'E2'], 'FOLLOWS_FROM_EVIDENCE'));
+        $verifier->scriptFor('CL2', $this->verdict('CL2', 'strong', ['E1', 'E2'], 'MULTIPLE_PREMISES_SUPPORT'));
 
         app(GroundedAnswerOrchestrator::class)->execute($run);
         $run->refresh();
@@ -57,10 +59,10 @@ class AnswerPipelineTest extends TestCase
         $this->assertSame('fake', $run->generator_provider);
         $this->assertSame('fake', $run->verifier_provider);
         $this->assertNotNull($run->classified_intent);
-        $this->assertSame('query-intent 1.0.0', $run->query_classifier_version);
-        $this->assertSame('evidence-unitizer 1.0.0', $run->evidence_unitizer_version);
-        $this->assertSame('grounded-generator 1.0.0', $run->generator_prompt_version);
-        $this->assertSame('grounded-verifier 1.0.0', $run->verifier_prompt_version);
+        $this->assertSame('query-intent 1.1.0', $run->query_classifier_version);
+        $this->assertSame('evidence-unitizer 1.1.0', $run->evidence_unitizer_version);
+        $this->assertSame('grounded-generator 1.1.0', $run->generator_prompt_version);
+        $this->assertSame('grounded-verifier 1.1.0', $run->verifier_prompt_version);
         $this->assertIsArray($run->timings_ms);
         $this->assertArrayHasKey('generation', $run->timings_ms);
         $this->assertArrayHasKey('verification', $run->timings_ms);
@@ -228,8 +230,10 @@ class AnswerPipelineTest extends TestCase
         $generator->scriptOutput($this->generatorAnswer([
             $this->claim('CL1', 'La lanterna proteggeva i pescatori.', ['E1']),
         ]));
-        // Verifier swaps in a different packet unit.
-        $verifier->scriptFor('CL1', $this->verdict('CL1', 'strong', ['E2'], 'BETTER_EVIDENCE'));
+        // Verifier swaps in a different packet unit; single-source
+        // strong requires an explicit entailment certification for the
+        // gate.
+        $verifier->scriptFor('CL1', $this->verdict('CL1', 'strong', ['E2'], 'LOGICAL_ENTAILMENT'));
 
         app(GroundedAnswerOrchestrator::class)->execute($run);
         $run->refresh();

@@ -32,6 +32,28 @@ class EvidencePacket
         return isset($this->units[$key]);
     }
 
+    /** Whether a fully-qualified atom key like "E3.S2" exists. */
+    public function hasAtom(string $atomKey): bool
+    {
+        return $this->atom($atomKey) !== null;
+    }
+
+    /** @return array{key: string, canonical_start: int, canonical_end: int, utf16_start: int, utf16_end: int, text: string}|null */
+    public function atom(string $atomKey): ?array
+    {
+        if (preg_match('/^(E\d+)\.(S\d+)$/', $atomKey, $matches) !== 1) {
+            return null;
+        }
+
+        return $this->units[$matches[1]]->atoms[$matches[2]] ?? null;
+    }
+
+    /** Unit key portion of an atom key ("E3.S2" → "E3"). */
+    public static function unitKeyOf(string $atomKey): string
+    {
+        return explode('.', $atomKey, 2)[0];
+    }
+
     /** @return list<string> */
     public function keys(): array
     {

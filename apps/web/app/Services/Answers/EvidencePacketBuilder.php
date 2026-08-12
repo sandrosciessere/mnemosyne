@@ -89,6 +89,66 @@ class EvidencePacketBuilder
         return $this->assemble($candidates, $unitizer, $config, $diagnostics);
     }
 
+    /**
+     * Compound-question packet: one bounded retrieval pass PER
+     * SUBQUESTION, unit streams interleaved subquestion-fairly so the
+     * budget cannot silently evict a whole information need. Units are
+     * tagged with the subquestion that found them; `$expandKeys` marks
+     * subquestions running with the (single) focused expansion budget.
+     *
+     * @param  list<int>  $assetIds
+     * @param  list<array{key: string, text: string}>  $subquestions
+     * @param  list<string>  $expandKeys
+     */
+    public function buildForSubquestions(
+        RetrievalGeneration $generation,
+        array $assetIds,
+        array $subquestions,
+        RetrievalPolicy $policy,
+        array $expandKeys = [],
+    ): EvidencePacket {
+        $config = config('mnemosyne.answers.evidence');
+        $unitizer = new EvidenceUnitizer((int) $config['unit_max_chars']);
+
+        $diagnostics = [
+            'policy' => $policy->toArray(),
+            'expanded' => $expandKeys !== [],
+            'expansion_targets' => $expandKeys,
+            'searches' => [],
+        ];
+
+        $streams = [];
+
+        foreach ($subquestions as $subquestion) {
+            $topK = in_array($subquestion['key'], $expandKeys, true) ? $policy->expansionTopK : $policy->topK;
+            $result = $this->search->search($generation, $assetIds, $subquestion['text'], $policy->mode, $topK, $policy->rerank);
+            $diagnostics['searches'][] = [
+                'mode' => $policy->mode,
+                'subquestion' => $subquestion['key'],
+                'query' => mb_substr($subquestion['text'], 0, 200),
+                'expanded' => in_array($subquestion['key'], $expandKeys, true),
+                'results' => count($result['results']),
+                'ms' => $result['timings_ms']['total'] ?? null,
+            ];
+            $diagnostics['skipped_assets'] = array_values(array_unique(array_merge(
+                $diagnostics['skipped_assets'] ?? [], $result['skipped_assets'],
+            )));
+
+            foreach ($result['results'] as $candidate) {
+                foreach ($unitizer->unitsForChunk($candidate['chunk'], [
+                    'branch' => 'subquestion',
+                    'subquestion' => $subquestion['key'],
+                    'final_rank' => $candidate['final_rank'] ?? null,
+                    'components' => array_keys($candidate['components'] ?? []),
+                ]) as $unit) {
+                    $streams[$subquestion['key']][] = $unit;
+                }
+            }
+        }
+
+        return $this->assembleStreams($streams, $config, $diagnostics, interleave: true);
+    }
+
     /** @param list<array> $results HybridSearchService candidates */
     private function collect(array &$candidates, array $results, string $branch): void
     {
@@ -125,11 +185,22 @@ class EvidencePacketBuilder
             }
         }
 
+        return $this->assembleStreams($streams, $config, $diagnostics, $interleaveUnits);
+    }
+
+    /**
+     * Shared selection: interleave streams fairly (or flatten), then
+     * dedupe + budget.
+     *
+     * @param  array<string, list<EvidenceUnit>>  $streams
+     */
+    private function assembleStreams(array $streams, array $config, array $diagnostics, bool $interleave): EvidencePacket
+    {
         $sequence = [];
 
-        if ($interleaveUnits) {
-            // Round-robin one unit per book per round (book order =
-            // scope order): the packet head is book-fair by
+        if ($interleave) {
+            // Round-robin one unit per stream per round (stream order =
+            // scope/subquestion order): the packet head is fair by
             // construction.
             $exhausted = false;
 
@@ -182,19 +253,32 @@ class EvidencePacketBuilder
         }
 
         $perAsset = [];
+        $perSubquestion = [];
+
         foreach ($selected as $unit) {
             $perAsset[$unit->bookPublicId] = ($perAsset[$unit->bookPublicId] ?? 0) + 1;
+
+            if (isset($unit->retrievalMeta['subquestion'])) {
+                $sq = $unit->retrievalMeta['subquestion'];
+                $perSubquestion[$sq] = ($perSubquestion[$sq] ?? 0) + 1;
+            }
+        }
+
+        $stats = [
+            'units' => count($selected),
+            'chars' => $chars,
+            'per_asset' => $perAsset,
+            'dropped_duplicates' => $droppedDuplicates,
+            'dropped_budget' => $droppedBudget,
+        ];
+
+        if ($perSubquestion !== []) {
+            $stats['per_subquestion'] = $perSubquestion;
         }
 
         return new EvidencePacket(
             units: $selected,
-            stats: [
-                'units' => count($selected),
-                'chars' => $chars,
-                'per_asset' => $perAsset,
-                'dropped_duplicates' => $droppedDuplicates,
-                'dropped_budget' => $droppedBudget,
-            ],
+            stats: $stats,
             diagnostics: $diagnostics,
         );
     }

@@ -110,9 +110,9 @@ class ReaderAndStaleSourceTest extends TestCase
 
         $run = $this->makeRun($user, 'lanterna', [$built['asset']->id]);
         $generator->scriptOutput($this->generatorAnswer([
-            $this->claim('CL1', 'La lanterna era il centro della vita del faro.', ['E2', 'E3']),
+            $this->claim('CL1', 'La comunità dipendeva dalla lanterna del faro.', ['E2', 'E3']),
         ]));
-        $verifier->scriptFor('CL1', $this->verdict('CL1', 'strong', ['E2', 'E3'], 'MULTIPLE_PASSAGES'));
+        $verifier->scriptFor('CL1', $this->verdict('CL1', 'strong', ['E2', 'E3'], 'MULTIPLE_PREMISES_SUPPORT'));
         app(GroundedAnswerOrchestrator::class)->execute($run);
         $run->refresh();
 

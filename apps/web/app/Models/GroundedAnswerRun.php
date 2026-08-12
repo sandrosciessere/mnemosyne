@@ -27,6 +27,7 @@ class GroundedAnswerRun extends Model
             'classified_intent' => QueryIntent::class,
             'retrieval_diagnostics' => 'array',
             'evidence_stats' => 'array',
+            'subquestions' => 'array',
             'timings_ms' => 'array',
             'retrieval_expansion_count' => 'integer',
             'started_at' => 'datetime',

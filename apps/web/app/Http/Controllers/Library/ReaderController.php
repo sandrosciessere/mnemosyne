@@ -45,15 +45,40 @@ class ReaderController extends Controller
             $answerPublicId = $answer->public_id;
             $keys = array_filter(explode(',', (string) $request->query('evidence', '')));
 
-            foreach ($answer->evidence()->whereIn('evidence_key', $keys)->get() as $evidence) {
+            foreach ($answer->evidence()->with('claims')->whereIn('evidence_key', $keys)->get() as $evidence) {
                 if ($evidence->book_asset_id !== $asset->id) {
                     continue; // evidence for a different book in the same answer
                 }
 
                 $resolved = $resolver->resolveEvidence($evidence);
 
-                if ($resolved['status'] === 'ok') {
-                    $spineIndex ??= $resolved['spine_index'];
+                if ($resolved['status'] !== 'ok') {
+                    $staleNotices[] = [
+                        'evidence_key' => $evidence->evidence_key,
+                        'citation_number' => $evidence->citation_number,
+                        'status' => $resolved['status'],
+                    ];
+
+                    continue;
+                }
+
+                $spineIndex ??= $resolved['spine_index'];
+
+                // Highlight the minimal verified CitationSpans (atoms
+                // selected by the verifier + gate) rather than the whole
+                // EvidenceUnit; units cited without spans (pre-corrective
+                // answers) fall back to the full unit range. Atom offsets
+                // are absolute — shift into the node-relative frame the
+                // resolver established for the unit.
+                $spans = [];
+
+                foreach ($evidence->claims as $claim) {
+                    foreach (json_decode((string) ($claim->pivot->atoms ?? '[]'), true) ?: [] as $atom) {
+                        $spans[$atom['key']] = $atom;
+                    }
+                }
+
+                if ($spans === []) {
                     $highlights[] = [
                         'evidence_key' => $evidence->evidence_key,
                         'citation_number' => $evidence->citation_number,
@@ -62,11 +87,18 @@ class ReaderController extends Controller
                         'utf16_start' => $resolved['utf16_start'],
                         'utf16_end' => $resolved['utf16_end'],
                     ];
-                } else {
-                    $staleNotices[] = [
+
+                    continue;
+                }
+
+                foreach ($spans as $atom) {
+                    $highlights[] = [
                         'evidence_key' => $evidence->evidence_key,
                         'citation_number' => $evidence->citation_number,
-                        'status' => $resolved['status'],
+                        'spine_index' => $resolved['spine_index'],
+                        'node_id' => $resolved['node_id'],
+                        'utf16_start' => $resolved['utf16_start'] + ($atom['utf16_start'] - $evidence->utf16_start),
+                        'utf16_end' => $resolved['utf16_start'] + ($atom['utf16_end'] - $evidence->utf16_start),
                     ];
                 }
             }
