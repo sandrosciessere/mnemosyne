@@ -2,6 +2,8 @@
 
 namespace App\Providers;
 
+use App\Services\Answers\Providers\FakeGenerationProvider;
+use App\Services\Answers\Providers\FakeVerifierProvider;
 use Illuminate\Cache\RateLimiting\Limit;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
@@ -14,7 +16,12 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // Deterministic provider doubles resolve to ONE instance per
+        // test request so scripted outputs registered by the test are
+        // seen by the pipeline. Their constructors refuse to run in
+        // production.
+        $this->app->singleton(FakeGenerationProvider::class);
+        $this->app->singleton(FakeVerifierProvider::class);
     }
 
     /**
@@ -35,6 +42,17 @@ class AppServiceProvider extends ServiceProvider
         // Retrieval search: CPU-bound (embedding + reranking) — bound it.
         RateLimiter::for('retrieval', function (Request $request) {
             return Limit::perMinute(30)->by(
+                $request->user()?->id !== null ? 'user:'.$request->user()->id : 'ip:'.$request->ip(),
+            );
+        });
+
+        // Grounded answer submission: each answer costs minutes of local
+        // model CPU — the per-minute limit complements the per-user
+        // active-run cap enforced in the submission service.
+        RateLimiter::for('answers', function (Request $request) {
+            $perMinute = (int) config('mnemosyne.answers.submissions_per_minute', 6);
+
+            return Limit::perMinute($perMinute)->by(
                 $request->user()?->id !== null ? 'user:'.$request->user()->id : 'ip:'.$request->ip(),
             );
         });

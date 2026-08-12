@@ -226,6 +226,24 @@ return [
             'nice' => 10,
         ],
 
+        // Interactive grounded answers: dedicated supervisor so answer
+        // jobs are never starved behind bulk indexing work, while
+        // concurrency 1 keeps the CPU-bound local model serial (nice 5 <
+        // retrieval's nice 10 → answers win the CPU when both queues are
+        // busy). Timeout must stay above answers.job_timeout_seconds.
+        'supervisor-answers' => [
+            'connection' => 'redis',
+            'queue' => [env('MNEMOSYNE_ANSWERS_QUEUE', 'answers')],
+            'balance' => 'off',
+            'maxProcesses' => (int) env('MNEMOSYNE_ANSWERS_CONCURRENCY', 1),
+            'maxTime' => 0,
+            'maxJobs' => 0,
+            'memory' => 256,
+            'tries' => 1,
+            'timeout' => (int) env('MNEMOSYNE_ANSWER_JOB_TIMEOUT', 1500) + 60,
+            'nice' => 5,
+        ],
+
         // EPUB ingestion pipeline. Queue order IS the priority order:
         // Horizon drains ingestion-high before ingestion-normal before
         // ingestion-low. Process count stays conservative on purpose —

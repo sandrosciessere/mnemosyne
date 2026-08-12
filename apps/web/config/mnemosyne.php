@@ -204,6 +204,78 @@ return [
         ],
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Grounded answers (Milestone 3)
+    |--------------------------------------------------------------------------
+    |
+    | question → intent → retrieval policy → EvidencePacket → structured
+    | generation → independent verification → verified claims + citations.
+    | Budgets are sized for the local CPU provider (prompt prefill is the
+    | dominant cost: ~25 tok/s cold on the current host model); every
+    | value here is part of answer reproducibility via the versions
+    | persisted on each run.
+    |
+    */
+    'answers' => [
+        'query_classifier_version' => 'query-intent 1.0.0',
+        'retrieval_profile_version' => 'retrieval-policy 1.0.0',
+        'unitizer_version' => 'evidence-unitizer 1.0.0',
+        'generator_prompt_version' => 'grounded-generator 1.0.0',
+        'verifier_prompt_version' => 'grounded-verifier 1.0.0',
+
+        'question_min_chars' => 3,
+        'question_max_chars' => 2000,
+        'scope_max_assets' => 100,
+
+        'evidence' => [
+            // Max source characters per EvidenceUnit (split at sentence
+            // boundaries, never bytes; provenance preserved exactly).
+            'unit_max_chars' => (int) env('MNEMOSYNE_ANSWER_UNIT_MAX_CHARS', 600),
+            // Packet budget: bounded units and total source characters.
+            'max_units' => (int) env('MNEMOSYNE_ANSWER_MAX_UNITS', 24),
+            'max_chars' => (int) env('MNEMOSYNE_ANSWER_MAX_CHARS', 14000),
+            // Sufficiency heuristic: below this many units the pipeline
+            // performs its single bounded retrieval expansion.
+            'min_sufficient_units' => (int) env('MNEMOSYNE_ANSWER_MIN_UNITS', 3),
+        ],
+
+        // queued | retrieving | ... jobs run here (Horizon supervisor).
+        'queue' => env('MNEMOSYNE_ANSWERS_QUEUE', 'answers'),
+        'job_timeout_seconds' => (int) env('MNEMOSYNE_ANSWER_JOB_TIMEOUT', 1500),
+        // Per-user concurrent active answer runs (queued or executing).
+        'max_active_runs_per_user' => (int) env('MNEMOSYNE_ANSWER_MAX_ACTIVE_PER_USER', 2),
+        // POST /api/v1/answers submissions per minute per user.
+        'submissions_per_minute' => (int) env('MNEMOSYNE_ANSWER_SUBMISSIONS_PER_MINUTE', 6),
+
+        'generator' => [
+            'provider' => env('MNEMOSYNE_PROVIDER_GENERATION', 'ollama'),
+            'model' => env('MNEMOSYNE_GENERATOR_MODEL', 'llama3.1:8b-instruct-q4_K_M'),
+            'timeout_seconds' => (int) env('MNEMOSYNE_GENERATOR_TIMEOUT', 600),
+            'max_retries' => (int) env('MNEMOSYNE_GENERATOR_MAX_RETRIES', 1),
+            'num_ctx' => (int) env('MNEMOSYNE_GENERATOR_NUM_CTX', 16384),
+            'max_output_tokens' => (int) env('MNEMOSYNE_GENERATOR_MAX_TOKENS', 1200),
+            'max_claims' => 12,
+        ],
+
+        'verifier' => [
+            'provider' => env('MNEMOSYNE_PROVIDER_VERIFIER', 'ollama'),
+            'model' => env('MNEMOSYNE_VERIFIER_MODEL', 'llama3.1:8b-instruct-q4_K_M'),
+            'timeout_seconds' => (int) env('MNEMOSYNE_VERIFIER_TIMEOUT', 300),
+            'max_retries' => (int) env('MNEMOSYNE_VERIFIER_MAX_RETRIES', 1),
+            'num_ctx' => (int) env('MNEMOSYNE_VERIFIER_NUM_CTX', 16384),
+            'max_output_tokens' => (int) env('MNEMOSYNE_VERIFIER_MAX_TOKENS', 400),
+        ],
+
+        // Consecutive provider failures before the circuit opens and
+        // queued runs fail fast instead of all waiting on a dead
+        // dependency; seconds until a probe is allowed again.
+        'circuit' => [
+            'failure_threshold' => (int) env('MNEMOSYNE_ANSWER_CIRCUIT_THRESHOLD', 3),
+            'cooldown_seconds' => (int) env('MNEMOSYNE_ANSWER_CIRCUIT_COOLDOWN', 120),
+        ],
+    ],
+
     'import_sources' => collect(explode(',', (string) env('MNEMOSYNE_IMPORT_SOURCES', '')))
         ->filter(fn ($pair) => str_contains($pair, '='))
         ->mapWithKeys(function ($pair) {
