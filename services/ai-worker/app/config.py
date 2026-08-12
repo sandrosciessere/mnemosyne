@@ -22,6 +22,7 @@ _DEFAULTS = {
     "WORKER_MAX_COMPRESSION_RATIO": 200.0,
     "WORKER_MAX_METADATA_FIELD_BYTES": 65_536,
     "WORKER_PARSE_TIMEOUT_SECONDS": 300,
+    "WORKER_EMBED_BATCH_SIZE": 16,
 }
 
 
@@ -71,3 +72,18 @@ def get_data_root() -> Path:
 
 def get_internal_token() -> str:
     return os.environ.get("MNEMOSYNE_INTERNAL_TOKEN", "")
+
+
+def get_embed_batch_size() -> int:
+    value = _env_int("WORKER_EMBED_BATCH_SIZE")
+    return value if value > 0 else int(_DEFAULTS["WORKER_EMBED_BATCH_SIZE"])
+
+
+def get_hf_home() -> Path:
+    """Hugging Face cache root (models live under <hf_home>/hub)."""
+    return Path(os.environ.get("HF_HOME", "/data/models/hf"))
+
+
+def allow_model_download() -> bool:
+    """When false (default) model loading is strictly offline."""
+    return os.environ.get("WORKER_ALLOW_MODEL_DOWNLOAD", "0") == "1"

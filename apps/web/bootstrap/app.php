@@ -26,6 +26,12 @@ return Application::configure(basePath: dirname(__DIR__))
         // which in turn is proxied by the host nginx (TLS termination).
         $middleware->trustProxies(at: '*');
 
+        // First-party same-origin SPA: browser sessions authenticate
+        // /api/v1 via Sanctum's stateful middleware (session + CSRF for
+        // requests whose Origin/Referer is in sanctum.stateful, which
+        // derives from APP_URL). Bearer-token auth is unaffected.
+        $middleware->statefulApi();
+
         $middleware->web(append: [
             HandleInertiaRequests::class,
             AddLinkHeadersForPreloadedAssets::class,

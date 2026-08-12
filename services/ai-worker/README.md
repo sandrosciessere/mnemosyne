@@ -252,6 +252,112 @@ metadata, cover, CSS and packaging.
   failure a stdlib `html.parser`-based tolerant extractor takes over and
   an `XHTML_NOT_WELL_FORMED` warning is recorded.
 
+## Retrieval API (`/internal/v1/retrieval`, Milestone 2)
+
+Local CPU embedding + reranking. Same auth as the EPUB API
+(`X-Mnemosyne-Internal-Token`; missing/wrong → `401`, token not
+configured → `503`). **All inference is local** (plain torch, CPU-only,
+AVX2): book text never leaves the server. Endpoint versions
+(`app/versions.py`): `EMBEDDING_ENDPOINT_VERSION 1.0.0`,
+`RERANK_ENDPOINT_VERSION 1.0.0`.
+
+### Model registry (`app/retrieval/models.py`, pinned revisions)
+
+| model_key | kind | HF id | revision | dims | license |
+|---|---|---|---|---|---|
+| `e5-small-v1` | embedding | `intfloat/multilingual-e5-small` | `614241f622f53c4eeff9890bdc4f31cfecc418b3` | 384 | MIT |
+| `mmarco-mini-v1` | reranker | `cross-encoder/mmarco-mMiniLMv2-L12-H384-v1` | `1427fd652930e4ba29e8149678df786c240d8825` | — | Apache-2.0 |
+
+Model files are **not** in git; they live in the HF cache under
+`HF_HOME` (default `/data/models/hf`, i.e. the `/data` bind mount).
+Models are loaded lazily, once per process, thread-safely.
+
+### `POST /internal/v1/retrieval/embed`
+
+Request: `{model_key, input_type: "query"|"passage", texts: [str],
+correlation_id?}`. Bounds: 1–64 texts, each 1–8000 chars (empty/
+whitespace-only rejected); violations → `422`.
+
+The worker applies the E5 prefixes itself based on `input_type`
+(`"query: "` / `"passage: "`) — callers send **raw text**. Inputs longer
+than the model's 512-token `max_seq_length` are truncated by the model
+tokenizer. Encoding uses `normalize_embeddings=True` (unit vectors,
+cosine metric) with internal batching (`WORKER_EMBED_BATCH_SIZE`,
+default 16).
+
+Response `200`:
+
+```json
+{
+  "model_key": "e5-small-v1",
+  "model_identity": {"hf_id": "…", "revision": "…", "dims": 384,
+                     "normalized": true, "metric": "cosine"},
+  "input_type": "query",
+  "vectors": [[0.01, …]],
+  "dims": 384,
+  "duration_ms": 42
+}
+```
+
+Every vector is validated (finite floats, exact `dims`); a bad model
+output is a `500 INTERNAL_ERROR` — NaN/Inf is never emitted.
+
+### `POST /internal/v1/retrieval/rerank`
+
+Request: `{model_key, query (1–2000 chars), candidates:
+[{id (non-empty), text (1–8000 chars)}], correlation_id?}`; 1–64
+candidates. Cross-encoder scoring of `(query, text)` pairs, batch 16.
+
+Response `200`:
+
+```json
+{
+  "model_key": "mmarco-mini-v1",
+  "model_identity": {"hf_id": "…", "revision": "…"},
+  "scores": [{"id": "c1", "score": 3.7}, {"id": "c2", "score": -2.1}],
+  "duration_ms": 120
+}
+```
+
+Scores are raw model outputs: finite floats, **higher is better,
+uncalibrated** — compare them only within one response. `scores` mirrors
+the input candidates 1:1 in the **input order** (no sorting server-side).
+
+### `GET /internal/v1/retrieval/models`
+
+Auth'd registry report — never downloads anything:
+`{models: [{model_key, kind, hf_id, revision, dims?, cached, loaded}]}`.
+`cached` = pinned snapshot present in the local HF cache (filesystem
+scan); `loaded` = model in memory in this process.
+
+### Provisioning & offline policy
+
+- `WORKER_ALLOW_MODEL_DOWNLOAD` (default `0`): when `0` the worker is
+  strictly offline (`HF_HUB_OFFLINE=1` is set for loads) and a request
+  for a non-provisioned model answers
+  `503 {"detail": {"code": "MODEL_NOT_PROVISIONED", …}}` — retryable:
+  provision, then retry. When `1`, first use may download from HF.
+- Provision on the server (inside the ai-worker container, with network
+  and `HF_HOME` pointing at the shared cache):
+
+  ```bash
+  python -m app.retrieval.provision --all            # or --model-key e5-small-v1
+  ```
+
+  Downloads the **exact pinned revisions**, prints identity, cache
+  location and size. ONNX/OpenVINO exports and the duplicate
+  `pytorch_model.bin` are skipped (safetensors + plain torch only).
+
+### CPU notes
+
+CPU-only torch wheels (`--extra-index-url
+https://download.pytorch.org/whl/cpu`, pinned `torch>=2.2,<3`); no CUDA.
+Both models are small (≈118 M params each, ≈0.5 GB fp32 on disk); with
+both loaded the worker stays well under its 6 GB container memory limit.
+Real-model tests (`pytest -m realmodel`, opt-in via `REALMODEL=1`) run
+only with a provisioned cache; the default suite never loads models and
+never touches the network.
+
 ## Tests / lint
 
 From the repository root:

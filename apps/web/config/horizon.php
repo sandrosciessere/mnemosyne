@@ -211,6 +211,21 @@ return [
             'nice' => 0,
         ],
 
+        // Retrieval indexing (Milestone 2 derived data). Separate from
+        // ingestion so a retrieval backfill can never starve book intake.
+        'supervisor-retrieval' => [
+            'connection' => 'redis',
+            'queue' => ['retrieval'],
+            'balance' => 'off',
+            'maxProcesses' => (int) env('MNEMOSYNE_RETRIEVAL_CONCURRENCY', 2),
+            'maxTime' => 0,
+            'maxJobs' => 0,
+            'memory' => 256,
+            'tries' => 1,
+            'timeout' => 1800,
+            'nice' => 10,
+        ],
+
         // EPUB ingestion pipeline. Queue order IS the priority order:
         // Horizon drains ingestion-high before ingestion-normal before
         // ingestion-low. Process count stays conservative on purpose —
