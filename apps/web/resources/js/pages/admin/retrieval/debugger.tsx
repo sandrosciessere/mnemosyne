@@ -320,7 +320,8 @@ export default function RetrievalDebugger({ active_generation, embedding_model, 
     const [query, setQuery] = useState('');
     const [mode, setMode] = useState<SearchMode>('hybrid');
     const [topK, setTopK] = useState('10');
-    const [rerank, setRerank] = useState(true);
+    // Opt-in like the API default: reranking adds seconds of CPU latency.
+    const [rerank, setRerank] = useState(false);
     const [caseSensitive, setCaseSensitive] = useState(false);
     const [selectedBooks, setSelectedBooks] = useState<string[]>([]);
 
@@ -419,6 +420,10 @@ export default function RetrievalDebugger({ active_generation, embedding_model, 
                                     required
                                     placeholder="Text to search for…"
                                 />
+                                <p className="text-muted-foreground text-xs">
+                                    Exact mode accepts literals up to 200 characters (the chunk-boundary guarantee); longer hybrid queries skip the
+                                    exact component.
+                                </p>
                             </div>
 
                             <div className="flex flex-wrap items-end gap-4">
@@ -533,6 +538,10 @@ export default function RetrievalDebugger({ active_generation, embedding_model, 
                                     <Badge variant="secondary">fallback: {meta.reranker_fallback_reason}</Badge>
                                 )}
                                 {meta.dense_unavailable === true && <Badge variant="destructive">dense unavailable</Badge>}
+                                {typeof meta.diagnostics?.lexical_strategy === 'string' && (
+                                    <Badge variant="secondary">lexical: {meta.diagnostics.lexical_strategy}</Badge>
+                                )}
+                                {meta.exact_skipped_reason && <Badge variant="secondary">exact skipped: {meta.exact_skipped_reason}</Badge>}
                             </div>
                             {meta.skipped_assets.length > 0 && (
                                 <div>

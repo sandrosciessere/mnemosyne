@@ -29,9 +29,12 @@ mnemosyne:retrieval:evaluate               # synthetic benchmark (see testing do
 - `index --all-ready` backfills every retrieval-eligible asset missing or
   not-ready in the generation; re-running touches only unfinished work
   (idempotent, resume-safe — a crash mid-embedding resumes at the next
-  missing chunk). `--asset=<ulid>` targets one book; without `--sync`
-  jobs go to the `retrieval` queue (Horizon `supervisor-retrieval`,
-  concurrency `MNEMOSYNE_RETRIEVAL_CONCURRENCY`, default 2).
+  missing chunk). Iteration is keyset-paginated (`lazyById`, page size
+  `MNEMOSYNE_RETRIEVAL_BACKFILL_BATCH`, default 500) — bounded memory at
+  any library size, no offset-pagination row skips. `--asset=<ulid>`
+  targets one book; without `--sync` jobs go to the `retrieval` queue
+  (Horizon `supervisor-retrieval`, concurrency
+  `MNEMOSYNE_RETRIEVAL_CONCURRENCY`, default 2).
 - Newly ingested books auto-enqueue into the ACTIVE generation when they
   reach ready_for_enrichment (idempotent hook; no active generation =
   no-op).

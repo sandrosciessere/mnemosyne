@@ -119,7 +119,11 @@ export interface SearchMeta {
     reranker_used: boolean;
     reranker_fallback_reason?: string | null;
     dense_unavailable?: boolean;
+    /** 'phrase_too_long' when hybrid skipped the exact component. */
+    exact_skipped_reason?: string | null;
     timings_ms?: Record<string, number> | null;
+    /** Admin debug only: diagnostics incl. lexical_strategy (strict | or_fallback). */
+    diagnostics?: Record<string, unknown> | null;
 }
 
 /** One neighbor chunk from GET /api/v1/retrieval/chunks/{chunk}/neighbors. */

@@ -146,7 +146,7 @@ export default function RetrievalIndex({ generations, eligible_assets }: Retriev
                     <div>
                         <h1 className="text-xl font-semibold">Retrieval</h1>
                         <p className="text-muted-foreground text-sm">
-                            {eligible_assets} {eligible_assets === 1 ? 'book' : 'books'} eligible for enrichment ·{' '}
+                            {eligible_assets} {eligible_assets === 1 ? 'book' : 'books'} eligible for retrieval indexing ·{' '}
                             {active ? `${active.assets.ready} ready in the active generation` : 'no active generation'}
                         </p>
                     </div>
