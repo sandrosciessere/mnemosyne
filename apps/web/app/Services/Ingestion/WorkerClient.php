@@ -3,7 +3,9 @@
 namespace App\Services\Ingestion;
 
 use App\Exceptions\Library\InvalidTransitionException;
+use App\Exceptions\Library\WorkerTimeoutException;
 use App\Exceptions\Library\WorkerUnavailableException;
+use GuzzleHttp\Exception\ConnectException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Http;
 
@@ -126,11 +128,14 @@ class WorkerClient
      * Authenticated POST for non-envelope retrieval endpoints
      * (embed/rerank). 4xx here is a deterministic caller bug and is
      * surfaced as-is via exception; 5xx/503/timeout are retryable.
+     * `$timeoutSeconds` overrides the general worker timeout for calls
+     * with their own deadline (e.g. the synchronous optional reranker).
      *
+     * @throws WorkerTimeoutException when the deadline elapses
      * @throws WorkerUnavailableException on transport failure or 5xx/503/401
      * @throws InvalidTransitionException on 4xx
      */
-    public function postJson(string $path, array $payload): array
+    public function postJson(string $path, array $payload, ?int $timeoutSeconds = null): array
     {
         $config = config('mnemosyne.worker');
 
@@ -138,10 +143,17 @@ class WorkerClient
             $response = Http::baseUrl($config['base_url'])
                 ->withHeaders(['X-Mnemosyne-Internal-Token' => (string) $config['internal_token']])
                 ->connectTimeout($config['connect_timeout_seconds'])
-                ->timeout($config['timeout_seconds'])
+                ->timeout($timeoutSeconds ?? $config['timeout_seconds'])
                 ->acceptJson()
                 ->post($path, $payload);
         } catch (ConnectionException $exception) {
+            if ($this->isTimeout($exception)) {
+                throw new WorkerTimeoutException(
+                    'Worker '.$path.' timed out: '.$exception->getMessage(),
+                    previous: $exception,
+                );
+            }
+
             throw new WorkerUnavailableException(
                 'Worker connection failed: '.$exception->getMessage(),
                 previous: $exception,
@@ -169,5 +181,19 @@ class WorkerClient
         }
 
         return $body;
+    }
+
+    /** Whether a connection failure was a deadline expiry (cURL errno 28). */
+    private function isTimeout(ConnectionException $exception): bool
+    {
+        $previous = $exception->getPrevious();
+
+        if ($previous instanceof ConnectException
+            && ($previous->getHandlerContext()['errno'] ?? null) === 28) {
+            return true;
+        }
+
+        return str_contains($exception->getMessage(), 'timed out')
+            || str_contains($exception->getMessage(), 'cURL error 28');
     }
 }

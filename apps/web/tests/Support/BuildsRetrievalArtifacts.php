@@ -103,7 +103,7 @@ trait BuildsRetrievalArtifacts
             'config' => [
                 'chunker' => ['version' => '1.0.0', 'config' => $chunkerConfig],
                 'query_normalization_version' => '1.0.0',
-                'lexical' => ['version' => '1.0.0', 'config' => 'simple'],
+                'lexical' => ['version' => '1.1.0', 'config' => 'simple'],
                 'embedding' => [
                     'provider' => 'test',
                     'model_key' => 'deterministic-test',

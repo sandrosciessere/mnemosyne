@@ -15,7 +15,11 @@ class QueryNormalizer
 {
     public function forExact(string $query): string
     {
-        return trim(mb_substr($query, 0, (int) config('mnemosyne.retrieval.search.max_exact_phrase_chars')));
+        // Literal fidelity: NO truncation — silently shortening a literal
+        // changes what the user asked for. Length policy is enforced
+        // upstream (API 422 in exact mode; exact component skipped with a
+        // diagnostic in hybrid mode).
+        return trim($query);
     }
 
     public function forLexical(string $query): string

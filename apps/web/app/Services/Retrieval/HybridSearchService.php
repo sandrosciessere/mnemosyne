@@ -2,6 +2,7 @@
 
 namespace App\Services\Retrieval;
 
+use App\Exceptions\Library\WorkerTimeoutException;
 use App\Exceptions\Library\WorkerUnavailableException;
 use App\Models\BookAsset;
 use App\Models\RetrievalAssetState;
@@ -75,17 +76,31 @@ class HybridSearchService
         if ($mode === 'exact' || $mode === 'hybrid') {
             $t = hrtime(true);
             $phrase = $this->normalizer->forExact($query);
-            $components['exact'] = $this->exact->search(
-                $generation, $readyAssetIds, $phrase, $caseSensitive, $candidatesPerRetriever,
-            );
+
+            // The boundary guarantee (phrase straddling a chunk partition
+            // is intact in one chunk) only holds up to the chunker
+            // overlap. Longer literals are rejected by the API in exact
+            // mode; in hybrid mode the exact component is skipped with an
+            // explicit diagnostic — never silently searched with a known
+            // false-negative window.
+            if (mb_strlen($phrase) > (int) config('mnemosyne.retrieval.search.max_exact_phrase_chars')) {
+                $components['exact'] = [];
+                $diagnostics['exact_skipped_reason'] = 'phrase_too_long';
+            } else {
+                $components['exact'] = $this->exact->search(
+                    $generation, $readyAssetIds, $phrase, $caseSensitive, $candidatesPerRetriever,
+                );
+            }
             $timings['exact'] = $this->ms($t);
         }
 
         if ($mode === 'lexical' || $mode === 'hybrid') {
             $t = hrtime(true);
-            $components['lexical'] = $this->lexical->search(
+            $lexical = $this->lexical->search(
                 $generation, $readyAssetIds, $this->normalizer->forLexical($query), $candidatesPerRetriever,
             );
+            $components['lexical'] = $lexical['candidates'];
+            $diagnostics['lexical_strategy'] = $lexical['strategy'];
             $timings['lexical'] = $this->ms($t);
         }
 
@@ -174,9 +189,11 @@ class HybridSearchService
         } catch (\Throwable $exception) {
             // Honest degradation: fused order stands, flag says so.
             $diagnostics['reranker_used'] = false;
-            $diagnostics['reranker_fallback_reason'] = $exception instanceof WorkerUnavailableException
-                ? 'worker_unavailable'
-                : 'reranker_error';
+            $diagnostics['reranker_fallback_reason'] = match (true) {
+                $exception instanceof WorkerTimeoutException => 'timeout',
+                $exception instanceof WorkerUnavailableException => 'worker_unavailable',
+                default => 'reranker_error',
+            };
             Log::warning('retrieval.rerank_fallback', ['error' => $exception->getMessage()]);
 
             return $fused;

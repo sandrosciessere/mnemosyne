@@ -106,6 +106,16 @@ paths:
         `dense` (semantic), `hybrid` (weighted reciprocal-rank fusion +
         optional local cross-encoder reranking). Returns evidence, never
         generated answers. Rate limited (30/min per user).
+
+        Authentication: first-party browser sessions (Sanctum stateful
+        SPA — session cookie + `X-XSRF-TOKEN`) or a Sanctum bearer token.
+
+        Exact mode accepts literals up to 200 characters: that is the
+        boundary guarantee (a phrase straddling a chunk partition is
+        findable only while its pre-boundary portion fits the chunker
+        overlap). Longer queries in exact mode return 422
+        `EXACT_QUERY_TOO_LONG`; in hybrid mode the exact component is
+        skipped and `meta.exact_skipped_reason` says so.
       requestBody:
         required: true
         content:
@@ -114,7 +124,7 @@ paths:
               type: object
               required: [query]
               properties:
-                query: { type: string, minLength: 1, maxLength: 1000 }
+                query: { type: string, minLength: 1, maxLength: 1000, description: "exact mode: max 200 chars (boundary guarantee)" }
                 mode: { type: string, enum: [exact, lexical, dense, hybrid], default: hybrid }
                 scope:
                   type: object
@@ -124,7 +134,7 @@ paths:
                       maxItems: 100
                       items: { type: string, pattern: "^[0-9a-z]{26}$" }
                 top_k: { type: integer, minimum: 1, maximum: 25, default: 10 }
-                rerank: { type: boolean, default: true }
+                rerank: { type: boolean, default: false, description: "opt-in local cross-encoder reranking (~seconds on CPU); on timeout/failure the fused order is returned with meta.reranker_used=false and meta.reranker_fallback_reason" }
                 case_sensitive: { type: boolean, default: false, description: exact mode only }
                 debug: { type: boolean, default: false, description: score provenance + timings; honored for admins only }
       responses:

@@ -16,6 +16,10 @@ class WorkerRerankerProvider implements RerankerProvider
 
     public function rerank(string $query, array $candidates): array
     {
+        // Dedicated deadline: a synchronous optional reranker must never
+        // hold a user request for the general worker timeout (~330 s).
+        $timeout = (int) config('mnemosyne.retrieval.reranker.timeout_seconds', 30);
+
         $response = $this->client->postJson('/internal/v1/retrieval/rerank', [
             'model_key' => $this->modelKey,
             'query' => $query,
@@ -23,7 +27,7 @@ class WorkerRerankerProvider implements RerankerProvider
                 'id' => $candidate['id'],
                 'text' => mb_substr($candidate['text'], 0, 8000),
             ], $candidates),
-        ]);
+        ], $timeout);
 
         $this->identity = ($response['model_identity'] ?? []) + ['model_key' => $this->modelKey];
 

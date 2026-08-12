@@ -46,6 +46,12 @@
       "expected": { "book_ref": "B", "phrase": "riparava meccanismi antichi" }
     },
     {
+      "id": "B-lexical-natural",
+      "type": "lexical-natural",
+      "query": "chi riparava nel vicolo i meccanismi antichi degli orologi fermi",
+      "expected": { "book_ref": "B", "phrase": "riparava meccanismi antichi" }
+    },
+    {
       "id": "B-ambiguous-tempo",
       "type": "adversarial",
       "query": "lo scorrere del tempo nel giardino delle ore",

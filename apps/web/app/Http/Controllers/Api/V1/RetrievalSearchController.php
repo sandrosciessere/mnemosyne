@@ -40,6 +40,20 @@ class RetrievalSearchController extends Controller
             return $this->errorResponse('QUERY_EMPTY', 'Query must not be blank.', 422);
         }
 
+        // Exact mode accepts only literals short enough for the chunk-
+        // boundary guarantee (pre-boundary portion <= chunker overlap).
+        // Never silently run an exact search with a known false-negative
+        // window.
+        $maxExact = (int) config('mnemosyne.retrieval.search.max_exact_phrase_chars');
+
+        if (($validated['mode'] ?? 'hybrid') === 'exact' && mb_strlen(trim($validated['query'])) > $maxExact) {
+            return $this->errorResponse(
+                'EXACT_QUERY_TOO_LONG',
+                "Exact phrases are limited to {$maxExact} characters (boundary guarantee).",
+                422,
+            );
+        }
+
         $generation = RetrievalGeneration::active();
 
         if ($generation === null) {
@@ -65,7 +79,9 @@ class RetrievalSearchController extends Controller
             $validated['query'],
             $validated['mode'] ?? 'hybrid',
             (int) ($validated['top_k'] ?? config('mnemosyne.retrieval.search.default_top_k')),
-            (bool) ($validated['rerank'] ?? true),
+            // Reranking is opt-in (independent review: ~3.5 s CPU latency
+            // for a mixed quality delta) — explicit rerank:true enables it.
+            (bool) ($validated['rerank'] ?? false),
             (bool) ($validated['case_sensitive'] ?? false),
         );
 
@@ -81,6 +97,7 @@ class RetrievalSearchController extends Controller
                 'reranker_used' => $outcome['diagnostics']['reranker_used'],
                 'reranker_fallback_reason' => $outcome['diagnostics']['reranker_fallback_reason'],
                 'dense_unavailable' => $outcome['diagnostics']['dense_unavailable'] ?? false,
+                'exact_skipped_reason' => $outcome['diagnostics']['exact_skipped_reason'] ?? null,
                 'timings_ms' => $debug ? $outcome['timings_ms'] : null,
                 'diagnostics' => $debug ? $outcome['diagnostics'] : null,
             ], fn ($value) => $value !== null),

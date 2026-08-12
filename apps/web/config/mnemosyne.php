@@ -141,7 +141,10 @@ return [
         ],
 
         'query_normalization_version' => '1.0.0',
-        'lexical_version' => '1.0.0',
+        // 1.1.0: strict websearch query + meaningful-token OR fallback
+        // when strict yields zero rows (natural-language queries).
+        // Generations snapshotting 1.0.0 keep strict-only behavior.
+        'lexical_version' => '1.1.0',
 
         'embedding' => [
             'model_key' => env('MNEMOSYNE_EMBEDDING_MODEL_KEY', 'e5-small-v1'),
@@ -171,7 +174,15 @@ return [
             'max_top_k' => 25,
             'default_top_k' => 10,
             'max_query_chars' => 1000,
-            'max_exact_phrase_chars' => 400,
+            // Exact literals are guaranteed findable across a chunk
+            // partition boundary only while the pre-boundary portion fits
+            // the chunker overlap (overlap_tail_chars). Capping accepted
+            // phrases at the overlap keeps the guarantee unconditional —
+            // raise both together or not at all.
+            'max_exact_phrase_chars' => (int) env(
+                'MNEMOSYNE_MAX_EXACT_PHRASE_CHARS',
+                env('MNEMOSYNE_CHUNK_OVERLAP_CHARS', 200),
+            ),
             // ANN under-return protection: overfetch factor before scope
             // filtering, plus pgvector iterative scans.
             'dense_overfetch' => (int) env('MNEMOSYNE_DENSE_OVERFETCH', 4),
@@ -181,6 +192,9 @@ return [
 
         'queue' => env('MNEMOSYNE_RETRIEVAL_QUEUE', 'retrieval'),
         'concurrency' => (int) env('MNEMOSYNE_RETRIEVAL_CONCURRENCY', 2),
+        // Keyset-pagination page size for --all-ready backfills: bounds
+        // memory regardless of library size.
+        'backfill_batch_size' => (int) env('MNEMOSYNE_RETRIEVAL_BACKFILL_BATCH', 500),
 
         'ann' => [
             'metric' => 'cosine',
