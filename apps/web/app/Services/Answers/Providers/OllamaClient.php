@@ -120,10 +120,11 @@ class OllamaClient
 
     public function modelDigest(string $model): ?string
     {
+        // /api/show omits the digest; the tags listing carries it.
         try {
             $response = Http::baseUrl((string) config('mnemosyne.ollama.base_url'))
                 ->connectTimeout(5)->timeout(15)->acceptJson()
-                ->post('/api/show', ['model' => $model]);
+                ->get('/api/tags');
         } catch (ConnectionException) {
             return null;
         }
@@ -132,9 +133,15 @@ class OllamaClient
             return null;
         }
 
-        $digest = $response->json('details.digest') ?? $response->json('digest');
+        foreach ((array) $response->json('models') as $entry) {
+            if (($entry['name'] ?? null) === $model || ($entry['model'] ?? null) === $model) {
+                $digest = $entry['digest'] ?? null;
 
-        return is_string($digest) ? mb_substr($digest, 0, 64) : null;
+                return is_string($digest) ? mb_substr($digest, 0, 64) : null;
+            }
+        }
+
+        return null;
     }
 
     private function recordFailure(string $circuitKey, array $config): void
