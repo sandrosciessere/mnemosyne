@@ -2,6 +2,8 @@
 
 use App\Http\Controllers\Api\V1\Admin\AdminIngestionRunApiController;
 use App\Http\Controllers\Api\V1\Admin\AdminSubmissionApiController;
+use App\Http\Controllers\Api\V1\AnswerApiController;
+use App\Http\Controllers\Api\V1\ConversationApiController;
 use App\Http\Controllers\Api\V1\RetrievalSearchController;
 use App\Http\Controllers\Api\V1\SubmissionApiController;
 use Illuminate\Http\Request;
@@ -31,6 +33,15 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             ->middleware('throttle:submissions')
             ->name('submissions.store');
         Route::get('submissions/{submission}', [SubmissionApiController::class, 'show'])->name('submissions.show');
+
+        Route::post('answers', [AnswerApiController::class, 'store'])
+            ->middleware('throttle:answers')
+            ->name('answers.store');
+        Route::get('answers/{answer}', [AnswerApiController::class, 'show'])->name('answers.show');
+        Route::get('answers/{answer}/evidence/{evidenceKey}', [AnswerApiController::class, 'evidence'])
+            ->name('answers.evidence');
+        Route::get('conversations', [ConversationApiController::class, 'index'])->name('conversations.index');
+        Route::get('conversations/{conversation}', [ConversationApiController::class, 'show'])->name('conversations.show');
 
         Route::post('retrieval/search', [RetrievalSearchController::class, 'search'])
             ->middleware('throttle:retrieval')
