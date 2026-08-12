@@ -57,13 +57,23 @@ models (and their dimensions), rerankers, prompts and retrieval profiles
 are all versioned; embedding upgrades use blue/green indexes with an
 atomic switch.
 
-## Future retrieval engine (not implemented)
+## Retrieval engine (implemented — Milestone 2)
 
-Exact + lexical + semantic + hybrid retrieval with reranking, query
-classification, dynamic retrieval depth, coverage-aware retrieval for
-longitudinal questions, multi-book and multilingual search, answers with
-verifiable citations and a final verifier. The number of passages fed to
-generation is never a fixed top-k.
+Exact + lexical + dense hybrid retrieval with weighted RRF, opt-in
+reranking, EvidenceSpan provenance and versioned blue/green retrieval
+generations: see `docs/architecture/retrieval.md`.
+
+## Grounded answers (implemented — Milestone 3)
+
+Query intent classification routes each question through a versioned
+retrieval policy into a bounded EvidencePacket; structured claim
+generation and an independent per-claim verifier produce epistemic
+labels (Fatto testuale / Deduzione forte / Interpretazione / Evidenza
+insufficiente / Contraddizione rilevata) with server-side exact
+citations and the Evidence Reader: see
+`docs/architecture/grounded-answers.md`. Full-book longitudinal /
+global-summary coverage remains an M4/M5 capability and is explicitly
+flagged, never faked with a Top-K answer.
 
 ## Quality benchmark (future)
 

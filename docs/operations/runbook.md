@@ -40,6 +40,17 @@ Dashboard at `/horizon`, restricted to authenticated admins (403
 otherwise). Queue worker runs in the `horizon` container; scheduler in the
 `scheduler` container (`schedule:work`).
 
+Queue/resource strategy (shared host, evolutive for M4/M5 batch jobs):
+`supervisor-answers` (queue `answers`, concurrency 1, nice 5) runs the
+interactive grounded-answer pipeline — one job at a time because the
+local generation model is CPU-serial, at BETTER priority than
+`supervisor-retrieval` (nice 10) so bulk indexing/embedding can never
+starve interactive answers; `supervisor-ingestion` handles book intake.
+Per-user protection: answers API throttle (default 6/min) + active-run
+cap (default 2, `MNEMOSYNE_ANSWER_MAX_ACTIVE_PER_USER`). A stuck answer
+cannot wedge: job timeout (default 1500 s) + failed-job reconciliation
+move it to `failed` with an error code (`/admin/answers` shows it).
+
 ## EPUB ingestion operations
 
 - Queues: `ingestion-high` → `ingestion-normal` → `ingestion-low`

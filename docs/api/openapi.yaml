@@ -177,6 +177,136 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /v1/answers:
+    post:
+      summary: Ask a grounded question (asynchronous)
+      description: |
+        Creates a grounded answer run and returns 202 immediately: the
+        pipeline (intent classification → bounded evidence retrieval →
+        structured generation → independent per-claim verification) takes
+        minutes on the local CPU model. Poll the returned resource; the
+        `status` field is REAL persisted job state.
+
+        Scope is fail-closed: any unknown or unauthorized book ULID makes
+        the whole request 403 (indistinguishably). Omitting `scope` means
+        every book the user can read. Provider/model selection is server
+        configuration — never a request field.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question: { type: string, minLength: 3, maxLength: 2000 }
+                scope:
+                  type: object
+                  properties:
+                    book_asset_ids:
+                      type: array
+                      maxItems: 100
+                      items: { type: string, description: BookAsset ULID }
+                conversation_id: { type: [string, "null"], description: Continue an owned conversation }
+      responses:
+        "202":
+          description: Answer run accepted and queued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      id: { type: string, description: Answer ULID }
+                      status: { type: string, enum: [queued] }
+                      conversation_id: { type: string }
+                      url: { type: string, description: Polling URL }
+        "403": { description: "error.code SCOPE_NOT_ACCESSIBLE | CONVERSATION_NOT_ACCESSIBLE" }
+        "409": { description: "error.code RETRIEVAL_INACTIVE — no active retrieval generation" }
+        "422": { description: "Validation error, or error.code QUESTION_EMPTY | SCOPE_EMPTY" }
+        "429": { description: "Throttle, or error.code TOO_MANY_ACTIVE_ANSWERS (per-user active-run cap)" }
+
+  /v1/answers/{id}:
+    get:
+      summary: Poll / read a grounded answer
+      description: |
+        Owner or admin only. Terminal statuses: `ready` (outcome answered
+        or partially_answered), `insufficient` (outcome
+        insufficient_evidence — a SUCCESSFUL honest state, not an error)
+        and `failed` (error_code set, e.g. GENERATOR_TIMEOUT,
+        VERIFIER_UNAVAILABLE, GENERATOR_INVALID_OUTPUT). Claims are ONLY
+        the verified ones; rejected claims are counted, never displayed.
+        Admins may pass `debug=1` for full diagnostics.
+      parameters:
+        - { $ref: "#/components/parameters/ulid" }
+        - { name: debug, in: query, schema: { type: boolean }, description: Admin-only diagnostics }
+      responses:
+        "200":
+          description: Current answer state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/GroundedAnswer" }
+        "403": { description: "error.code ANSWER_NOT_ACCESSIBLE" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/answers/{id}/evidence/{evidenceKey}:
+    get:
+      summary: One evidence unit of an answer (source panel detail)
+      parameters:
+        - { $ref: "#/components/parameters/ulid" }
+        - { name: evidenceKey, in: path, required: true, schema: { type: string }, description: "Opaque key (E1, E2, ...)" }
+      responses:
+        "200":
+          description: Durable evidence snapshot with exact provenance
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: "#/components/schemas/AnswerCitation" }
+        "403": { description: "error.code ANSWER_NOT_ACCESSIBLE" }
+        "404": { description: "error.code EVIDENCE_NOT_FOUND" }
+
+  /v1/conversations:
+    get:
+      summary: List the authenticated user's conversations (most recent first)
+      responses:
+        "200":
+          description: Conversation summaries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        title: { type: [string, "null"] }
+                        last_activity_at: { type: [string, "null"], format: date-time }
+
+  /v1/conversations/{id}:
+    get:
+      summary: Conversation transcript
+      description: |
+        User turns carry `content`; assistant turns embed the referenced
+        grounded answer (`answer`, same shape as GET /v1/answers/{id}) —
+        assistant messages have no free-form prose of their own.
+        Conversation history is referential context only and is NEVER
+        used as evidence for later answers.
+      parameters: [{ $ref: "#/components/parameters/ulid" }]
+      responses:
+        "200": { description: Ordered messages with embedded answers }
+        "403": { description: "error.code CONVERSATION_NOT_ACCESSIBLE" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /v1/admin/submissions:
     get:
       summary: "[admin] List all submissions"
@@ -582,6 +712,96 @@ components:
               type: { type: string, description: "e.g. run.queued, stage.completed, run.needs_review" }
               payload: { type: [object, "null"] }
               created_at: { type: string, format: date-time }
+
+    GroundedAnswer:
+      type: object
+      description: |
+        A grounded answer run. Every claim shown is VERIFIED by the
+        independent verifier and carries an epistemic label — the only
+        confidence representation (there are no probabilities/percentages).
+      properties:
+        id: { type: string, description: ULID }
+        status:
+          type: string
+          enum: [queued, retrieving, expanding_retrieval, generating, verifying, ready, insufficient, failed]
+          description: Real persisted pipeline state (poll this)
+        outcome:
+          type: [string, "null"]
+          enum: [answered, partially_answered, insufficient_evidence, null]
+          description: Terminal answer semantics (insufficient_evidence is a successful honest state)
+        question: { type: string }
+        conversation_id: { type: [string, "null"] }
+        intent:
+          type: [string, "null"]
+          enum: [point_lookup, local_explanation, global_summary, longitudinal, comparative_multi_book, quote_location, tricky_inference, null]
+        capability_notice:
+          type: [string, "null"]
+          description: "Set for intents beyond honest M3 coverage (e.g. LIMITED_GLOBAL_SUMMARY_SUPPORT): the answer is bounded evidence, not full-book analysis"
+        retrieval_expanded: { type: boolean, description: whether the single bounded retrieval expansion ran }
+        claims:
+          type: array
+          items: { $ref: "#/components/schemas/AnswerClaim" }
+        rejected_claim_count: { type: integer, description: generator claims rejected by the verifier (never displayed) }
+        citations:
+          type: array
+          items: { $ref: "#/components/schemas/AnswerCitation" }
+        scope:
+          type: array
+          items:
+            type: object
+            properties:
+              book_asset_id: { type: string }
+              title: { type: [string, "null"] }
+        skipped_assets:
+          type: array
+          items: { type: string }
+          description: authorized books not indexed in the answer's generation (never silently partial)
+        error_code: { type: [string, "null"], description: "Terminal failures: GENERATOR_TIMEOUT | GENERATOR_UNAVAILABLE | GENERATOR_INVALID_OUTPUT | VERIFIER_TIMEOUT | VERIFIER_UNAVAILABLE | VERIFIER_INVALID_OUTPUT | RETRIEVAL_UNAVAILABLE | ANSWER_JOB_FAILED | ANSWER_PIPELINE_ERROR" }
+        created_at: { type: [string, "null"], format: date-time }
+        completed_at: { type: [string, "null"], format: date-time }
+
+    AnswerClaim:
+      type: object
+      properties:
+        key: { type: string, description: "CL1, CL2, ..." }
+        text: { type: string, description: Verified claim text (plain text — render as text, never HTML) }
+        label:
+          type: [string, "null"]
+          enum: [textual_fact, strong_inference, interpretation, conflict, null]
+          description: Final epistemic label DECIDED BY THE VERIFIER
+        label_user: { type: [string, "null"], description: "Italian user label: Fatto testuale / Deduzione forte / Interpretazione / Contraddizione rilevata" }
+        citations:
+          type: array
+          items: { type: integer }
+          description: Server-assigned citation numbers (first-appearance order; conflict claims cite ALL disagreeing sources)
+
+    AnswerCitation:
+      type: object
+      description: |
+        Durable evidence snapshot: resolves through canonical source
+        coordinates, never through retrieval chunks — historical answers
+        stay auditable after retrieval generations are superseded.
+      properties:
+        number: { type: [integer, "null"], description: citation number (null for uncited packet units in admin views) }
+        evidence_key: { type: string, description: "Opaque packet key (E1, ...)" }
+        book_asset_id: { type: [string, "null"], description: null when the book was removed }
+        book_title: { type: [string, "null"] }
+        work_title: { type: [string, "null"] }
+        edition_label: { type: [string, "null"] }
+        heading_path: { type: array, items: { type: string } }
+        node_type: { type: [string, "null"] }
+        spine_index: { type: integer }
+        source_href: { type: [string, "null"] }
+        source_fragment: { type: [string, "null"] }
+        epub_cfi: { type: [string, "null"], description: never invented — null until M1 artifacts emit CFI; canonical coordinates are authoritative }
+        canonical_start: { type: integer, description: codepoint offset in canonical source }
+        canonical_end: { type: integer }
+        excerpt: { type: string, description: EXACT bounded canonical slice (original source language — never translated) }
+        stale: { type: boolean, description: fail-closed staleness against the CURRENT source }
+        stale_reason:
+          type: [string, "null"]
+          enum: [CITATION_SOURCE_CHANGED, ASSET_REMOVED, null]
+          description: when set, the exact source location can no longer be guaranteed and the reader will not highlight
 
 security:
   - sanctum: []

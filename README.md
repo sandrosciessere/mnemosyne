@@ -11,8 +11,17 @@ approval workflow, a versioned five-stage ingestion pipeline
 READY_FOR_ENRICHMENT), safe EPUB 2/3 parsing in the Python worker,
 exact + content deduplication, the admin processing control plane and
 the `/api/v1` submission/admin API (`docs/api/openapi.yaml`,
-`docs/architecture/epub-ingestion.md`). Semantic enrichment (embeddings,
-retrieval, analysis) is not implemented yet.
+`docs/architecture/epub-ingestion.md`). Milestone 2 added the retrieval
+foundation: deterministic chunking with EvidenceSpan provenance, exact +
+lexical + dense hybrid search with weighted RRF, local CPU embeddings and
+versioned blue/green retrieval generations
+(`docs/architecture/retrieval.md`). Milestone 3 added grounded question
+answering: query intent classification, bounded evidence packets,
+structured claim generation with independent per-claim verification,
+epistemic labels, exact citations and the Evidence Reader
+(`docs/architecture/grounded-answers.md`). Enrichment (M4), deep analysis
+(M5) and the remaining MVP surface are tracked in
+`docs/requirements/mvp-v1.1-traceability.md`.
 
 - Staging URL: https://mnemosyne.shellrent.com
 - License: not yet selected.
