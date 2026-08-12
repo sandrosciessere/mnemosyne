@@ -79,11 +79,11 @@ class AnswerPersistencePgTest extends IntegrationTestCase
         );
 
         $generator->scriptOutput($this->generatorAnswer([
-            $this->claim('CL1', 'Nel primo libro il faro nord è il centro della vita del guardiano.', ['E1']),
-            $this->claim('CL2', 'Nel secondo libro il faro è solo una metafora per la lampada della locanda.', ['E2']),
+            $this->claim('CL1', 'Nel primo libro il guardiano dedica ogni giornata alla cura del faro nord.', ['E1']),
+            $this->claim('CL2', 'Nel secondo libro il faro compare come immagine per la lampada della locanda.', ['E2'], 'interpretation'),
         ]));
         $verifier->scriptFor('CL1', $this->verdict('CL1', 'direct', ['E1']));
-        $verifier->scriptFor('CL2', $this->verdict('CL2', 'strong', ['E2'], 'METAPHORICAL_USE'));
+        $verifier->scriptFor('CL2', $this->verdict('CL2', 'interpretive', ['E2'], 'METAPHORICAL_USE'));
 
         app(GroundedAnswerOrchestrator::class)->execute($run);
         $run->refresh();
