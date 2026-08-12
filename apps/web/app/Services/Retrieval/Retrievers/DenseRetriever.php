@@ -54,7 +54,7 @@ class DenseRetriever
             );
         });
 
-        $rows = array_slice($rows, 0, $limit);
+        $rows = array_slice(self::sortByDistance($rows), 0, $limit);
 
         if ($rows === []) {
             return [];
@@ -84,5 +84,25 @@ class DenseRetriever
         }
 
         return $results;
+    }
+
+    /**
+     * hnsw.iterative_scan = relaxed_order does NOT guarantee globally
+     * distance-sorted rows: overfetched candidates are re-sorted
+     * explicitly before dense ranks are assigned (they feed RRF).
+     * Deterministic tie-break on chunk id.
+     *
+     * @param  list<object{retrieval_chunk_id: int|string, distance: float|string}>  $rows
+     * @return list<object>
+     */
+    public static function sortByDistance(array $rows): array
+    {
+        usort($rows, function ($a, $b) {
+            $byDistance = (float) $a->distance <=> (float) $b->distance;
+
+            return $byDistance !== 0 ? $byDistance : ((int) $a->retrieval_chunk_id <=> (int) $b->retrieval_chunk_id);
+        });
+
+        return $rows;
     }
 }

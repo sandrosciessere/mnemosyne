@@ -7,7 +7,7 @@ use App\Models\BookAsset;
 use App\Models\RetrievalGeneration;
 use App\Services\Retrieval\RetrievalIndexer;
 use Illuminate\Console\Command;
-use Illuminate\Support\Collection;
+use Illuminate\Database\Eloquent\Builder;
 
 class RetrievalIndexAssets extends Command
 {
@@ -29,17 +29,20 @@ class RetrievalIndexAssets extends Command
             return self::FAILURE;
         }
 
-        $assets = $this->resolveAssets($generation);
+        $processed = 0;
 
-        if ($assets->isEmpty()) {
-            $this->info('Nothing to index: every eligible asset is already ready in this generation.');
+        $batchSize = max(1, (int) config('mnemosyne.retrieval.backfill_batch_size'));
 
-            return self::SUCCESS;
-        }
+        // lazyById: keyset (id-cursor) pagination — bounded memory,
+        // restart-safe and never skips rows the way offset pagination
+        // does on a mutating table. Each asset is visited exactly once
+        // per run; the indexer/job layer is idempotent on top.
+        foreach ($this->resolveAssets($generation)->lazyById($batchSize) as $asset) {
+            if ($processed === 0) {
+                $this->info("indexing into generation {$generation->public_id}".($this->option('sync') ? ' (sync)' : ''));
+            }
+            $processed++;
 
-        $this->info("indexing {$assets->count()} asset(s) into generation {$generation->public_id}".($this->option('sync') ? ' (sync)' : ''));
-
-        foreach ($assets as $asset) {
             if ($this->option('sync')) {
                 $state = $indexer->indexAsset($generation, $asset);
                 $this->line(sprintf(
@@ -58,6 +61,12 @@ class RetrievalIndexAssets extends Command
             }
         }
 
+        if ($processed === 0) {
+            $this->info('Nothing to index: every eligible asset is already ready in this generation.');
+        } else {
+            $this->info("{$processed} asset(s) ".($this->option('sync') ? 'indexed' : 'queued').'.');
+        }
+
         return self::SUCCESS;
     }
 
@@ -73,19 +82,18 @@ class RetrievalIndexAssets extends Command
             ?? RetrievalGeneration::query()->where('status', 'building')->latest('id')->first();
     }
 
-    /** @return Collection<int, BookAsset> */
+    /** @return Builder<BookAsset> query for lazyById iteration */
     private function resolveAssets(RetrievalGeneration $generation)
     {
         if ($this->option('asset')) {
             return BookAsset::query()
-                ->where('public_id', (string) $this->option('asset'))
-                ->get();
+                ->where('public_id', (string) $this->option('asset'));
         }
 
         if (! $this->option('all-ready')) {
             $this->warn('Specify --asset=<ulid> or --all-ready.');
 
-            return collect();
+            return BookAsset::query()->whereRaw('1 = 0');
         }
 
         // Eligible assets missing from the generation or not yet ready in
@@ -98,8 +106,6 @@ class RetrievalIndexAssets extends Command
                     ->from('retrieval_asset_states')
                     ->where('retrieval_generation_id', $generation->id)
                     ->where('status', 'ready');
-            })
-            ->orderBy('id')
-            ->get();
+            });
     }
 }
