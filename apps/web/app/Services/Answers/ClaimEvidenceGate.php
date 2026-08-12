@@ -44,6 +44,8 @@ class ClaimEvidenceGate
 
     public const REASON_STALE_SUPPORT = 'STALE_SUPPORT';
 
+    public const REASON_DIRECT_STRUCTURALLY_CONFIRMED = 'DIRECT_STRUCTURALLY_CONFIRMED';
+
     /** Verifier reason codes that certify single-premise logical entailment. */
     private const ENTAILMENT_REASONS = ['LOGICAL_ENTAILMENT', 'LOGICALLY_ENTAILED', 'STRICT_ENTAILMENT', 'DIRECT_PARAPHRASE'];
 
@@ -94,14 +96,30 @@ class ClaimEvidenceGate
         }
 
         if ($claimType === ClaimTypeClassifier::ATOMIC_FACT) {
-            // Atomic facts are direct-or-nothing (conflict stays allowed:
-            // it exposes disagreeing sources rather than asserting).
-            if (! in_array($verdict->supportLevel, ['direct', 'conflict'], true)) {
-                return $this->rejected($claimType, self::REASON_IDENTITY_REQUIRES_DIRECT);
-            }
+            $structural = $this->structuralSupport($claim->text, $atoms);
 
-            if ($verdict->supportLevel === 'direct' && ! $this->valueTokensSupported($claim->text, $atoms)) {
-                return $this->rejected($claimType, self::REASON_DIRECT_NOT_ESTABLISHED);
+            if ($verdict->supportLevel === 'direct') {
+                if ($structural === 'refuted') {
+                    return $this->rejected($claimType, self::REASON_DIRECT_NOT_ESTABLISHED);
+                }
+            } elseif ($verdict->supportLevel === 'strong' && $structural === 'confirmed') {
+                // The spec's explicit-formulation clause: a conservative
+                // verifier answered "strong", but the application's own
+                // deterministic check CONFIRMS the atoms explicitly
+                // predicate the value of the subject (copula or
+                // apposition). Auditable promotion, never silent:
+                // gate_reason_code records it.
+                return [
+                    'result' => 'passed',
+                    'reason' => self::REASON_DIRECT_STRUCTURALLY_CONFIRMED,
+                    'claim_type' => $claimType,
+                    'final_level_override' => 'direct',
+                ];
+            } elseif ($verdict->supportLevel !== 'conflict') {
+                // Atomic facts are otherwise direct-or-nothing (conflict
+                // stays allowed: it exposes disagreeing sources rather
+                // than asserting).
+                return $this->rejected($claimType, self::REASON_IDENTITY_REQUIRES_DIRECT);
             }
         }
 
@@ -141,12 +159,18 @@ class ClaimEvidenceGate
      * lexical form legitimately differs, and the verifier plus explicit
      * source atoms carry that case.
      */
-    private function valueTokensSupported(string $claimText, array $atoms): bool
+    /**
+     * @return 'confirmed'|'refuted'|'unverifiable' whether the atoms
+     *                                              explicitly predicate the asserted value of the subject
+     */
+    private function structuralSupport(string $claimText, array $atoms): string
     {
         $atomText = implode(' ', array_column($atoms, 'text'));
 
         if ($this->language->detect($claimText) !== $this->language->detect($atomText)) {
-            return true;
+            // Cross-language: the lexical form legitimately differs —
+            // never refute, never confirm.
+            return 'unverifiable';
         }
 
         $claim = mb_strtolower($claimText);
@@ -161,25 +185,22 @@ class ClaimEvidenceGate
             $subject = $this->lastContentWord($matches[1]);
             $value = $this->prefix($matches[2]);
 
-            if ($subject !== null) {
-                $s = preg_quote($subject, '/');
-                $v = preg_quote($value, '/');
-
-                // subject … copula … value (same clause), or apposition
-                // "subject, … value", or reverse apposition
-                // "value …, subject".
-                $predicated = preg_match('/\b'.$s.'[\p{L}\']*\b[^.;!?]{0,60}\b(?:è|era|sono|erano|is|was|are|were)\b[^.;!?]{0,50}'.$v.'/u', $atomsLower) === 1
-                    || preg_match('/\b'.$s.'[\p{L}\']*\s*,\s*[^,;.!?]{0,50}'.$v.'/u', $atomsLower) === 1
-                    || preg_match('/'.$v.'[^,;.!?]{0,50},\s*[^,;.!?]{0,20}\b'.$s.'/u', $atomsLower) === 1;
-
-                if (! $predicated) {
-                    return false;
-                }
-            } elseif (! str_contains($this->normalize($atomsLower), $this->normalize($value))) {
-                return false;
+            if ($subject === null) {
+                return str_contains($this->normalize($atomsLower), $this->normalize($value))
+                    ? 'unverifiable'
+                    : 'refuted';
             }
 
-            return true;
+            $s = preg_quote($subject, '/');
+            $v = preg_quote($value, '/');
+
+            // subject … copula … value (same clause), or apposition
+            // "subject, … value", or reverse apposition "value …, subject".
+            $predicated = preg_match('/\b'.$s.'[\p{L}\']*\b[^.;!?]{0,60}\b(?:è|era|sono|erano|is|was|are|were)\b[^.;!?]{0,50}'.$v.'/u', $atomsLower) === 1
+                || preg_match('/\b'.$s.'[\p{L}\']*\s*,\s*[^,;.!?]{0,50}'.$v.'/u', $atomsLower) === 1
+                || preg_match('/'.$v.'[^,;.!?]{0,50},\s*[^,;.!?]{0,20}\b'.$s.'/u', $atomsLower) === 1;
+
+            return $predicated ? 'confirmed' : 'refuted';
         }
 
         // ── Naming claims: value name + one more claim content word ─
@@ -187,29 +208,31 @@ class ClaimEvidenceGate
             $normalizedAtoms = $this->normalize($atomsLower);
 
             if (! str_contains($normalizedAtoms, $this->normalize($this->prefix($matches[1])))) {
-                return false;
+                return 'refuted';
             }
 
             foreach ($this->contentWords($claim) as $word) {
                 if ($this->normalize($word) !== $this->normalize($matches[1])
                     && str_contains($normalizedAtoms, $this->normalize($this->prefix($word)))) {
-                    return true;
+                    return 'confirmed';
                 }
             }
 
-            return false;
+            return 'unverifiable';
         }
 
         // ── Numeric assertions: the number itself must be present ───
-        if (preg_match_all('/\b(\d{3,4})\b/', $claim, $matches)) {
+        if (preg_match_all('/\b(\d{3,4})\b/', $claim, $matches) && $matches[1] !== []) {
             foreach ($matches[1] as $number) {
                 if (! str_contains($atomsLower, $number)) {
-                    return false;
+                    return 'refuted';
                 }
             }
+
+            return 'confirmed';
         }
 
-        return true; // nothing structurally checkable — rely on the verifier
+        return 'unverifiable'; // nothing structurally checkable — rely on the verifier
     }
 
     private function lastContentWord(string $phrase): ?string

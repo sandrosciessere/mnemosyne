@@ -40,10 +40,10 @@ class GeneratorOutputValidator
         }
 
         if ($status === 'insufficient_evidence') {
-            if ($claims !== []) {
-                $this->reject('insufficient_evidence must carry no claims');
-            }
-
+            // Conservative normalization: some models attach "there is
+            // no evidence for X" pseudo-claims to an insufficient
+            // verdict. Nothing may be published from an insufficient
+            // answer anyway — drop them instead of failing the run.
             return new GenerationResult($status, []);
         }
 
@@ -92,8 +92,17 @@ class GeneratorOutputValidator
 
             $keys = $claim['evidence_keys'] ?? null;
 
-            if (! is_array($keys) || $keys === []) {
-                $this->reject('every claim needs at least one evidence key');
+            if (! is_array($keys)) {
+                $this->reject('evidence_keys must be an array');
+            }
+
+            if ($keys === []) {
+                // Conservative normalization: an evidence-less claim is
+                // typically the model narrating an UNSUPPORTED part
+                // ("non è possibile stabilire…"). It can never be
+                // verified or displayed — drop it; subquestion coverage
+                // reports the gap honestly.
+                continue;
             }
 
             $keys = array_values(array_unique($keys));
@@ -115,6 +124,12 @@ class GeneratorOutputValidator
             }
 
             $drafts[] = new GeneratedClaimDraft($key, trim($text), $label, $keys, $subquestion);
+        }
+
+        if ($drafts === []) {
+            // Every claim was dropped as evidence-less: the honest
+            // reading of this output is insufficiency, not an answer.
+            return new GenerationResult('insufficient_evidence', []);
         }
 
         return new GenerationResult($status, $drafts);

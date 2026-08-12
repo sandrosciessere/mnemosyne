@@ -37,15 +37,33 @@ class VerifierOutputValidator
         }
 
         $atomKeys = array_values(array_unique($atomKeys));
+        $normalized = [];
         $evidenceKeys = [];
 
         foreach ($atomKeys as $atomKey) {
-            if (! is_string($atomKey) || ! $packet->hasAtom($atomKey)) {
-                $this->reject('unknown support atom '.(is_string($atomKey) ? $atomKey : gettype($atomKey)));
+            if (! is_string($atomKey)) {
+                $this->reject('unknown support atom '.gettype($atomKey));
             }
 
+            // Unambiguous normalization: a bare unit key (E4) whose unit
+            // has exactly ONE atom means E4.S1 — no vagueness possible.
+            // Bare references to multi-atom units stay invalid: the
+            // verifier must identify the exact asserting sentence.
+            if (preg_match('/^E\d+$/', $atomKey) === 1
+                && isset($packet->units[$atomKey])
+                && count($packet->units[$atomKey]->atoms) === 1) {
+                $atomKey .= '.'.array_key_first($packet->units[$atomKey]->atoms);
+            }
+
+            if (! $packet->hasAtom($atomKey)) {
+                $this->reject('unknown support atom '.$atomKey);
+            }
+
+            $normalized[] = $atomKey;
             $evidenceKeys[] = EvidencePacket::unitKeyOf($atomKey);
         }
+
+        $atomKeys = array_values(array_unique($normalized));
 
         if ($atomKeys === [] && in_array($level, ['direct', 'strong', 'interpretive', 'conflict'], true)) {
             $this->reject('a supported/conflict verdict requires support atoms');

@@ -135,7 +135,7 @@ Your job is NOT to use world knowledge or your memory of any book.
 Your job is NOT to reward semantic relatedness.
 Ask only: do specific sentences in the evidence actually entail this exact proposition?
 
-Select the exact sentence atoms (IDs like E3.S2) that entail the claim. You may use different atoms than the generator proposed, from anywhere in the evidence block, but nothing outside it.
+Select the exact sentence atoms (IDs like E3.S2) that entail the claim. You may use different atoms than the generator proposed, from anywhere in the evidence block, but nothing outside it. NEVER return a bare unit ID like "E3" — always the full sentence atom ID like "E3.S2".
 
 - "direct": the selected atoms explicitly state or unambiguously encode the exact proposition. If the evidence directly states the claim, you MUST answer "direct", not "strong".
 - "strong": not stated verbatim, but the selected atoms together logically entail it. Normally requires at least two independent atoms, or one atom that strictly entails the claim.
@@ -148,9 +148,13 @@ Traps you must never fall into (these are all "none" unless another atom explici
 - ownership/command is NOT identity: "Selene told her driver to leave" does NOT support "Selene is the driver";
 - working for someone is NOT assuming their identity: "the chauffeur works for Varro" does NOT support "the chauffeur assumes Varro's identity";
 - being mentioned or speaking is NOT an attribute: "Lio spoke to the assembly" does NOT support "Lio is a pig";
-- proximity, resemblance, family relation or traveling together are NOT identity;
+- proximity, resemblance or traveling together are NOT identity;
+- two related people are NOT the same person (a son is not his father) — but an explicit statement OF the relation fully supports a claim ABOUT that relation;
 - sequence is NOT causation.
-Positive example: "Tomas, the son of Marek, entered" DOES directly support "Tomas is Marek's son" (an explicit appositive counts as direct, in any language).
+Positive examples (explicit statements ARE direct, in any language):
+- "Tomas, the son of Marek, entered" directly supports "Tomas is Marek's son";
+- "Tomas, il figlio di Marek, entrò nella sala" supporta direttamente "Tomas è il figlio di Marek";
+- "Argo was the oldest horse in the stable" directly supports "Argo is a horse".
 
 reason_code: one short SCREAMING_SNAKE_CASE code (e.g. DIRECTLY_STATED, LOGICAL_ENTAILMENT, MULTIPLE_PREMISES_SUPPORT, PARTIAL_SUPPORT, NO_MENTION, ASSOCIATION_NOT_IDENTITY, SOURCES_DISAGREE, OUTSIDE_EVIDENCE).
 

@@ -373,7 +373,13 @@ class GroundedAnswerOrchestrator
             foreach ($generated->claims as $ordinal => $draft) {
                 $verdict = $verdicts[$draft->claimKey];
                 $gateResult = $gateResults[$draft->claimKey];
-                $level = VerifierSupportLevel::from($verdict->supportLevel);
+                // The gate may promote an atomic strong verdict to
+                // direct when its structural check CONFIRMED explicit
+                // predication (auditable via gate_reason_code); the raw
+                // verifier level stays persisted unmodified.
+                $level = VerifierSupportLevel::from(
+                    $gateResult['final_level_override'] ?? $verdict->supportLevel,
+                );
                 $finalLabel = $level->toEpistemicLabel();
                 $verified = $finalLabel !== null && $gateResult['result'] === 'passed';
 

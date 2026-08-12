@@ -3,8 +3,12 @@
 namespace Tests\Integration;
 
 use App\Enums\AnswerRunStatus;
+use App\Models\GroundedAnswerClaim;
+use App\Models\GroundedAnswerRun;
+use App\Models\RetrievalGeneration;
 use App\Models\User;
 use App\Services\Answers\GroundedAnswerOrchestrator;
+use App\Services\Retrieval\RetrievalIndexer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
@@ -110,6 +114,147 @@ class GroundedAnswerRealProviderTest extends IntegrationTestCase
             foreach ($run->claims()->where('verification_status', 'verified')->get() as $claim) {
                 $this->assertStringNotContainsString('1939', $claim->claim_text);
                 $this->assertGreaterThan(0, $claim->evidence->count());
+            }
+        }
+    }
+
+    /** Invented hard-negative corpus for the strict-entailment gate. */
+    private function adversarialBook(User $user): array
+    {
+        $built = $this->buildArtifacts([
+            0 => [
+                ['type' => 'heading', 'text' => 'La tenuta di Arlen', 'heading_path' => ['La tenuta di Arlen']],
+                ['text' => 'Tre cani si misero accanto ad Arlen durante la riunione della tenuta.'],
+                ['text' => 'Lio parlò all\'assemblea con voce ferma e nessuno lo interruppe.'],
+                ['text' => 'Tomas, il figlio di Marek, entrò nella sala senza salutare.'],
+                ['text' => 'Selene guidava una vecchia Daimler grigia lungo la strada della costa.'],
+                ['text' => 'Il custode della tenuta chiudeva i cancelli ogni sera prima del tramonto.'],
+            ],
+        ]);
+        $generation = RetrievalGeneration::active() ?? $this->makeTestGeneration('active');
+        app(RetrievalIndexer::class)->indexAsset($generation, $built['asset']);
+        $this->grant($built['asset'], $user);
+
+        return $built;
+    }
+
+    /** @return list<GroundedAnswerClaim> verified claims of a finished run */
+    private function runReal(User $user, array $built, string $question): GroundedAnswerRun
+    {
+        $run = $this->makeRun($user, $question, [$built['asset']->id]);
+        app(GroundedAnswerOrchestrator::class)->execute($run);
+        $run->refresh();
+
+        $this->assertTrue($run->status->isTerminal(), 'run must reach a terminal state');
+        $this->assertNotSame('failed', $run->status->value, 'error: '.$run->error_code.' '.$run->error_message);
+
+        return $run;
+    }
+
+    public function test_real_adversarial_association_is_not_identity(): void
+    {
+        $user = User::factory()->create();
+        $built = $this->adversarialBook($user);
+
+        $run = $this->runReal($user, $built, 'Arlen è un cane?');
+
+        // The REAL verifier+gate must never certify species-by-
+        // proximity: no verified claim may assert Arlen is a dog.
+        foreach ($run->claims()->where('verification_status', 'verified')->get() as $claim) {
+            $this->assertDoesNotMatchRegularExpression(
+                '/arlen\s+(è|era)\s+(un\s+)?cane/iu',
+                $claim->claim_text,
+                'association→identity false positive survived: '.$claim->claim_text,
+            );
+        }
+    }
+
+    public function test_real_adversarial_mention_is_not_species(): void
+    {
+        $user = User::factory()->create();
+        $built = $this->adversarialBook($user);
+
+        $run = $this->runReal($user, $built, 'Che specie di animale è Lio?');
+
+        // Speaking to an assembly establishes no species: any verified
+        // claim asserting a species for Lio is a false positive.
+        foreach ($run->claims()->where('verification_status', 'verified')->get() as $claim) {
+            $this->assertDoesNotMatchRegularExpression(
+                '/lio\s+(è|era)\s+(un|una)\s+\p{L}+/iu',
+                $claim->claim_text,
+                'mention→attribute false positive survived: '.$claim->claim_text,
+            );
+        }
+    }
+
+    public function test_real_direct_relationship_statement_is_supported(): void
+    {
+        $user = User::factory()->create();
+        $built = $this->adversarialBook($user);
+
+        $run = $this->runReal($user, $built, 'Di chi è figlio Tomas?');
+
+        // The apposition "Tomas, il figlio di Marek" is explicit: the
+        // pipeline should answer it (label calibration reported
+        // separately; the invariant is a VERIFIED gated claim citing
+        // real atoms).
+        $verified = $run->claims()->where('verification_status', 'verified')->get();
+        $audit = $run->claims->map(fn ($claim) => implode('|', [
+            $claim->claim_text,
+            'type='.$claim->claim_type,
+            'level='.$claim->verifier_support_level?->value,
+            'gate='.$claim->gate_result.':'.$claim->gate_reason_code,
+        ]))->implode(' ;; ');
+        $this->assertGreaterThan(0, $verified->count(), 'explicit relationship must be answerable — outcome='.$run->outcome?->value.' claims: '.$audit);
+
+        foreach ($verified as $claim) {
+            $this->assertSame('passed', $claim->gate_result);
+            $this->assertGreaterThan(0, $claim->evidence->count());
+        }
+    }
+
+    public function test_real_two_part_question_yields_partial_not_fabrication(): void
+    {
+        $user = User::factory()->create();
+        $built = $this->adversarialBook($user);
+
+        $run = $this->runReal($user, $built, 'La vecchia Daimler e chi prende la sua identità nel libro?');
+
+        // The identity half has NO source support: it must never appear
+        // as a verified claim.
+        foreach ($run->claims()->where('verification_status', 'verified')->get() as $claim) {
+            $this->assertDoesNotMatchRegularExpression(
+                '/(prende|assume)\s+(la\s+sua\s+|l\')identit/iu',
+                $claim->claim_text,
+                'fabricated identity-taking claim survived: '.$claim->claim_text,
+            );
+        }
+
+        $this->assertContains($run->outcome?->value, ['partially_answered', 'insufficient_evidence', 'answered']);
+
+        // Compound decomposition happened and the identity part is not
+        // marked answered by an identity-taking assertion.
+        if ($run->subquestions !== null && $run->outcome?->value === 'partially_answered') {
+            $unanswered = array_filter($run->subquestions, fn ($sq) => $sq['status'] === 'unanswered');
+            $this->assertNotEmpty($unanswered);
+        }
+    }
+
+    public function test_real_source_insufficient_identity_question_stays_honest(): void
+    {
+        $user = User::factory()->create();
+        $built = $this->adversarialBook($user);
+
+        $run = $this->runReal($user, $built, 'Chi è realmente il custode della tenuta?');
+
+        // Revelation-style question with no revelation in the source:
+        // capability notice (tricky inference) and no invented identity.
+        $this->assertNotNull($run->capability_notice);
+
+        foreach ($run->claims()->where('verification_status', 'verified')->get() as $claim) {
+            if ($claim->claim_type === 'atomic_fact') {
+                $this->assertSame('direct', $claim->verifier_support_level->value);
+                $this->assertSame('passed', $claim->gate_result);
             }
         }
     }
