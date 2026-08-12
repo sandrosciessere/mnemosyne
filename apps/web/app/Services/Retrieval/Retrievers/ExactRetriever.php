@@ -5,6 +5,7 @@ namespace App\Services\Retrieval\Retrievers;
 use App\Models\RetrievalChunk;
 use App\Models\RetrievalGeneration;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 /**
  * Literal source-text retrieval. Parameterized LIKE/ILIKE with escaped
@@ -78,27 +79,51 @@ class ExactRetriever
     /** @return list<array> */
     private function locateMatches(RetrievalChunk $chunk, string $phrase, bool $caseSensitive): array
     {
-        $haystack = $caseSensitive ? $chunk->source_text : mb_strtolower($chunk->source_text);
-        $needle = $caseSensitive ? $phrase : mb_strtolower($phrase);
+        $source = $chunk->source_text;
         $length = mb_strlen($phrase);
+        $foldedPhrase = $caseSensitive ? null : mb_strtolower($phrase);
 
         $matches = [];
         $offset = 0;
 
         while (count($matches) < self::MATCHES_PER_CHUNK) {
-            $position = mb_strpos($haystack, $needle, $offset);
+            // Offsets are ALWAYS located in the original source string.
+            // Unicode case folding is not length-preserving (e.g. İ →
+            // i+U+0307), so positions must never be derived from a folded
+            // copy of the haystack: mb_stripos searches case-insensitively
+            // while returning original-string coordinates.
+            $position = $caseSensitive
+                ? mb_strpos($source, $phrase, $offset)
+                : mb_stripos($source, $phrase, $offset);
 
             if ($position === false) {
                 break;
             }
 
-            $matches[] = [
-                'chunk_start' => $position,
-                'chunk_end' => $position + $length,
-                'canonical_start' => $this->toCanonical($chunk, $position),
-                'canonical_end' => $this->toCanonical($chunk, $position + $length, end: true),
-                'text' => mb_substr($chunk->source_text, $position, $length),
-            ];
+            $text = mb_substr($source, $position, $length);
+
+            // Defense in depth: never emit provenance whose original-source
+            // slice does not equal the requested literal under the selected
+            // case semantics (a length-changing fold INSIDE the match could
+            // make the fixed-length slice diverge — skip, don't lie).
+            $valid = $caseSensitive
+                ? $text === $phrase
+                : mb_strtolower($text) === $foldedPhrase;
+
+            if ($valid) {
+                $matches[] = [
+                    'chunk_start' => $position,
+                    'chunk_end' => $position + $length,
+                    'canonical_start' => $this->toCanonical($chunk, $position),
+                    'canonical_end' => $this->toCanonical($chunk, $position + $length, end: true),
+                    'text' => $text,
+                ];
+            } else {
+                Log::debug('retrieval.exact_match_fold_skip', [
+                    'chunk' => $chunk->public_id,
+                    'position' => $position,
+                ]);
+            }
 
             $offset = $position + 1;
         }
