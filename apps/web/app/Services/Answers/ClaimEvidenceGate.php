@@ -100,6 +100,24 @@ class ClaimEvidenceGate
 
             if ($verdict->supportLevel === 'direct') {
                 if ($structural === 'refuted') {
+                    // The verifier certified the right UNIT but picked
+                    // the wrong sentence (a known 8B weakness): scan the
+                    // SIBLING atoms of the cited units with the same
+                    // deterministic matcher. A sibling that explicitly
+                    // predicates the value of the subject replaces the
+                    // span — auditable, source-exact, still within
+                    // verifier-endorsed units only.
+                    $corrected = $this->findConfirmingSiblingAtom($claim->text, $verdict, $packet);
+
+                    if ($corrected !== null) {
+                        return [
+                            'result' => 'passed',
+                            'reason' => self::REASON_DIRECT_STRUCTURALLY_CONFIRMED,
+                            'claim_type' => $claimType,
+                            'atom_keys_override' => [$corrected],
+                        ];
+                    }
+
                     return $this->rejected($claimType, self::REASON_DIRECT_NOT_ESTABLISHED);
                 }
             } elseif ($verdict->supportLevel === 'strong' && $structural === 'confirmed') {
@@ -233,6 +251,32 @@ class ClaimEvidenceGate
         }
 
         return 'unverifiable'; // nothing structurally checkable — rely on the verifier
+    }
+
+    /** Scan sibling atoms of the verifier-cited units for explicit predication. */
+    private function findConfirmingSiblingAtom(string $claimText, VerificationResult $verdict, EvidencePacket $packet): ?string
+    {
+        foreach (array_unique($verdict->supportedEvidenceKeys) as $unitKey) {
+            $unit = $packet->units[$unitKey] ?? null;
+
+            if ($unit === null) {
+                continue;
+            }
+
+            foreach ($unit->atoms as $atomKey => $atom) {
+                $qualified = $unitKey.'.'.$atomKey;
+
+                if (in_array($qualified, $verdict->supportedAtomKeys, true)) {
+                    continue;
+                }
+
+                if ($this->structuralSupport($claimText, [$atom]) === 'confirmed') {
+                    return $qualified;
+                }
+            }
+        }
+
+        return null;
     }
 
     private function lastContentWord(string $phrase): ?string

@@ -219,6 +219,30 @@ class GroundedAnswerOrchestrator
             $g = hrtime(true);
             $gateResults[$claim->claimKey] = $this->gate->evaluate($claim, $verdicts[$claim->claimKey], $packet);
             $gateMs += $this->ms($g);
+
+            // ONE bounded gate-informed retry: the verifier answered
+            // direct but selected atoms that do not state the claim
+            // (wrong sentence picked). Tell it exactly that; the second
+            // verdict — whatever it is — is final.
+            if (($gateResults[$claim->claimKey]['reason'] ?? null) === ClaimEvidenceGate::REASON_DIRECT_NOT_ESTABLISHED) {
+                Log::info('answers.gate_informed_reverify', ['run' => $run->public_id, 'claim' => $claim->claimKey]);
+
+                try {
+                    $verdicts[$claim->claimKey] = $verifier->verify(
+                        $run->question,
+                        $packet,
+                        $claim,
+                        'the atoms you selected do not explicitly state this claim. Select the exact sentence atom(s) that state it (they may be elsewhere in the evidence), or answer "none".',
+                    );
+
+                    $g = hrtime(true);
+                    $gateResults[$claim->claimKey] = $this->gate->evaluate($claim, $verdicts[$claim->claimKey], $packet);
+                    $gateMs += $this->ms($g);
+                } catch (ProviderInvalidOutputException) {
+                    // Keep the original rejected verdict — never fail the
+                    // whole run for a rescue attempt.
+                }
+            }
         }
         $timings['claim_gate'] = round($gateMs, 1);
         $timings['verification'] = $this->ms($t) - $timings['claim_gate'];
@@ -414,15 +438,23 @@ class GroundedAnswerOrchestrator
                     $answeredSubquestions[$draft->subquestion] = true;
                 }
 
-                // Attach evidence with the minimal verified atom spans.
+                // Attach evidence with the minimal verified atom spans
+                // (the gate may have substituted a structurally
+                // confirmed sibling atom).
+                $effectiveAtomKeys = $gateResult['atom_keys_override'] ?? $verdict->supportedAtomKeys;
                 $atomsByUnit = [];
 
-                foreach ($verdict->supportedAtomKeys as $atomKey) {
+                foreach ($effectiveAtomKeys as $atomKey) {
                     $unitKey = EvidencePacket::unitKeyOf($atomKey);
                     $atomsByUnit[$unitKey][] = $atomKey;
                 }
 
-                foreach ($verdict->supportedEvidenceKeys as $key) {
+                $effectiveEvidenceKeys = array_values(array_unique(array_map(
+                    fn ($atomKey) => EvidencePacket::unitKeyOf($atomKey),
+                    $effectiveAtomKeys,
+                )));
+
+                foreach ($effectiveEvidenceKeys as $key) {
                     $evidence = $evidenceByKey->get($key);
 
                     if ($evidence === null) {

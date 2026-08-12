@@ -31,7 +31,7 @@ class FakeVerifierProvider implements VerifierProvider
         $this->script[$claimKey] = $output;
     }
 
-    public function verify(string $question, EvidencePacket $packet, GeneratedClaimDraft $claim): VerificationResult
+    public function verify(string $question, EvidencePacket $packet, GeneratedClaimDraft $claim, ?string $feedback = null): VerificationResult
     {
         $this->calls[] = $claim->claimKey;
 

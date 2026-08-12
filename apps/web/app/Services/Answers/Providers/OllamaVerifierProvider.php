@@ -22,12 +22,18 @@ class OllamaVerifierProvider implements VerifierProvider
         private readonly array $config,
     ) {}
 
-    public function verify(string $question, EvidencePacket $packet, GeneratedClaimDraft $claim): VerificationResult
+    public function verify(string $question, EvidencePacket $packet, GeneratedClaimDraft $claim, ?string $feedback = null): VerificationResult
     {
+        $instruction = $this->prompts->verifierInstruction($question, $claim);
+
+        if ($feedback !== null) {
+            $instruction .= "\n\nAPPLICATION CHECK FAILED on your previous verdict: ".$feedback;
+        }
+
         $messages = [
             ['role' => 'system', 'content' => $this->prompts->systemPreamble()],
             ['role' => 'user', 'content' => $this->prompts->evidenceBlock($packet)
-                ."\n".$this->prompts->verifierInstruction($question, $claim)],
+                ."\n".$instruction],
         ];
 
         $attempts = 1 + max(0, (int) $this->config['max_retries']);

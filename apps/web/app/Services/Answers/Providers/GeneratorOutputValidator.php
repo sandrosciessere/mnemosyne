@@ -105,7 +105,15 @@ class GeneratorOutputValidator
                 continue;
             }
 
-            $keys = array_values(array_unique($keys));
+            // Models sometimes cite the atom form (E7.S2) although the
+            // generator contract asks for unit keys: normalize
+            // unambiguously to the parent unit.
+            $keys = array_values(array_unique(array_map(
+                fn ($evidenceKey) => is_string($evidenceKey) && preg_match('/^(E\d+)\.S\d+$/', $evidenceKey, $m) === 1
+                    ? $m[1]
+                    : $evidenceKey,
+                $keys,
+            )));
 
             foreach ($keys as $evidenceKey) {
                 if (! is_string($evidenceKey) || ! $packet->has($evidenceKey)) {
