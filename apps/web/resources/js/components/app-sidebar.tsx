@@ -4,7 +4,20 @@ import { NavUser } from '@/components/nav-user';
 import { Sidebar, SidebarContent, SidebarFooter, SidebarHeader, SidebarMenu, SidebarMenuButton, SidebarMenuItem } from '@/components/ui/sidebar';
 import { type NavItem, type SharedData } from '@/types';
 import { Link, usePage } from '@inertiajs/react';
-import { BookOpen, Folder, Inbox, LayoutGrid, Library, ListChecks, ScrollText, Search, SearchCode, Settings2, Users } from 'lucide-react';
+import {
+    BookOpen,
+    Folder,
+    Inbox,
+    LayoutGrid,
+    Library,
+    ListChecks,
+    MessageSquareQuote,
+    ScrollText,
+    Search,
+    SearchCode,
+    Settings2,
+    Users,
+} from 'lucide-react';
 import AppLogo from './app-logo';
 
 const mainNavItems: NavItem[] = [
@@ -50,6 +63,11 @@ const adminNavItems: NavItem[] = [
         title: 'Retrieval',
         url: '/admin/retrieval',
         icon: SearchCode,
+    },
+    {
+        title: 'Answers',
+        url: '/admin/answers',
+        icon: MessageSquareQuote,
     },
     {
         title: 'Users',
