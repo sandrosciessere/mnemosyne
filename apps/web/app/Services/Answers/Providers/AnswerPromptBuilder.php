@@ -160,7 +160,7 @@ Positive examples (explicit statements ARE direct, in any language):
 - "Argo was the oldest horse in the stable" directly supports "Argo is a horse";
 - an atom that states how something works ("la leva apre la valvola dopo tre minuti") directly supports a claim restating that mechanism — answer "direct", not "strong", when the claim is a faithful restatement of what the atoms say.
 
-Also report answers_subquestion: true only if this claim, by itself, actually answers (fully or partly) the question part above — a claim can be well supported by the text and still NOT answer what was asked (wrong attribute, wrong entity, background fact): report false in that case.
+Also report answers_subquestion: does this claim address what was actually asked? Report false ONLY when the claim is clearly about something else (wrong attribute, wrong entity, unrelated background fact); if it answers the question even partly or you are unsure, report true. (This field is about RELEVANCE only — support_level already covers evidential strength.)
 
 reason_code: one short SCREAMING_SNAKE_CASE code (e.g. DIRECTLY_STATED, LOGICAL_ENTAILMENT, MULTIPLE_PREMISES_SUPPORT, PARTIAL_SUPPORT, NO_MENTION, ASSOCIATION_NOT_IDENTITY, SOURCES_DISAGREE, OUTSIDE_EVIDENCE).
 

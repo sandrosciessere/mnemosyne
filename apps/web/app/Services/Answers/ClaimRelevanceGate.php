@@ -46,11 +46,6 @@ class ClaimRelevanceGate
      */
     public function evaluate(GeneratedClaimDraft $claim, VerificationResult $verdict, TaskContract $contract, ?EvidencePacket $packet = null): array
     {
-        // Model-assisted rejection (advisory bit, only trusted to say NO).
-        if ($verdict->answersSubquestion === false) {
-            return ['result' => 'rejected', 'reason' => self::REASON_VERIFIER_NON_RESPONSIVE];
-        }
-
         $claimNorm = $this->normalize($claim->text);
         $shapeChecked = false;
 
@@ -127,6 +122,17 @@ class ClaimRelevanceGate
             if ($overlap === 0) {
                 return ['result' => 'rejected', 'reason' => self::REASON_NON_RESPONSIVE];
             }
+        }
+
+        // Model-assisted rejection (advisory bit): acted on ONLY when
+        // NOTHING deterministic could validate the claim (no shape
+        // check applied and no anchors to test). Application contract
+        // checks are authoritative for structured tasks — the measured
+        // 8B bit produces false negatives on claims that literally
+        // answer the question, so it never overrides a deterministic
+        // pass.
+        if (! $shapeChecked && $verdict->answersSubquestion === false) {
+            return ['result' => 'rejected', 'reason' => self::REASON_VERIFIER_NON_RESPONSIVE];
         }
 
         return ['result' => 'passed', 'reason' => null];

@@ -12,6 +12,7 @@ use App\Services\Retrieval\RetrievalIndexer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Str;
 use Tests\Support\BuildsAnswerFixtures;
 
 /**
@@ -128,6 +129,7 @@ class GroundedAnswerRealProviderTest extends IntegrationTestCase
                 ['text' => 'Lio parlò all\'assemblea con voce ferma e nessuno lo interruppe.'],
                 ['text' => 'Tomas, il figlio di Marek, entrò nella sala senza salutare.'],
                 ['text' => 'Selene guidava una vecchia Daimler grigia lungo la strada della costa.'],
+                ['text' => 'Il marito di Selene era morto da tre anni, prima del grande raccolto.'],
                 ['text' => 'Il custode della tenuta chiudeva i cancelli ogni sera prima del tramonto.'],
             ],
         ]);
@@ -136,6 +138,63 @@ class GroundedAnswerRealProviderTest extends IntegrationTestCase
         $this->grant($built['asset'], $user);
 
         return $built;
+    }
+
+    public function test_real_relevance_negative_yes_no_fact(): void
+    {
+        $user = User::factory()->create();
+        $built = $this->adversarialBook($user);
+
+        $run = $this->runReal($user, $built, 'Selene ha un marito in vita?');
+
+        // Either honestly insufficient, or answered with claims that
+        // actually address the marital state (relevance-passed by
+        // construction) citing real atoms — never adjacent facts about
+        // the Daimler or the dogs.
+        foreach ($run->claims()->where('verification_status', 'verified')->get() as $claim) {
+            $this->assertMatchesRegularExpression(
+                '/marit|mort|viv|vedov/iu',
+                Str::ascii(mb_strtolower($claim->claim_text)),
+                'yes/no claim must address the asked state: '.$claim->claim_text,
+            );
+            $this->assertSame('passed', $claim->relevance_result);
+            $this->assertGreaterThan(0, $claim->evidence->count());
+        }
+    }
+
+    public function test_real_relevance_description_stays_on_target(): void
+    {
+        $user = User::factory()->create();
+        $built = $this->adversarialBook($user);
+
+        $run = $this->runReal($user, $built, 'Descrivi la Daimler di Selene.');
+
+        foreach ($run->claims()->where('verification_status', 'verified')->get() as $claim) {
+            $this->assertStringContainsStringIgnoringCase(
+                'daimler',
+                $claim->claim_text,
+                'description claims must be about the requested object: '.$claim->claim_text,
+            );
+        }
+    }
+
+    public function test_real_relevance_unrelated_grounded_facts_never_answer(): void
+    {
+        $user = User::factory()->create();
+        $built = $this->adversarialBook($user);
+
+        // The book has plenty of TRUE facts about dogs, Tomas and the
+        // Daimler; none answers this question about the gates.
+        $run = $this->runReal($user, $built, 'Come funziona la chiusura dei cancelli della tenuta?');
+
+        foreach ($run->claims()->where('verification_status', 'verified')->get() as $claim) {
+            $ascii = Str::ascii(mb_strtolower($claim->claim_text));
+            $this->assertDoesNotMatchRegularExpression(
+                '/\b(cani|daimler|tomas|marek)\b/u',
+                $ascii,
+                'grounded-but-irrelevant claim survived: '.$claim->claim_text,
+            );
+        }
     }
 
     /** @return list<GroundedAnswerClaim> verified claims of a finished run */
