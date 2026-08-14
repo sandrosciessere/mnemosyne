@@ -2,6 +2,7 @@
 
 namespace App\Services\Answers;
 
+use App\Models\RetrievalChunk;
 use App\Models\RetrievalGeneration;
 use App\Services\Retrieval\HybridSearchService;
 
@@ -16,6 +17,7 @@ class EvidencePacketBuilder
     public function __construct(
         private readonly HybridSearchService $search,
         private readonly QueryIntentClassifier $classifier,
+        private readonly QueryReformulator $reformulator,
     ) {}
 
     /**
@@ -100,11 +102,15 @@ class EvidencePacketBuilder
      * @param  list<array{key: string, text: string}>  $subquestions
      * @param  list<string>  $expandKeys
      */
+    /**
+     * @param  array<string, TaskContract>  $contracts  keyed by subquestion key
+     */
     public function buildForSubquestions(
         RetrievalGeneration $generation,
         array $assetIds,
         array $subquestions,
         RetrievalPolicy $policy,
+        array $contracts = [],
         array $expandKeys = [],
     ): EvidencePacket {
         $config = config('mnemosyne.answers.evidence');
@@ -120,33 +126,147 @@ class EvidencePacketBuilder
         $streams = [];
 
         foreach ($subquestions as $subquestion) {
-            $topK = in_array($subquestion['key'], $expandKeys, true) ? $policy->expansionTopK : $policy->topK;
-            $result = $this->search->search($generation, $assetIds, $subquestion['text'], $policy->mode, $topK, $policy->rerank);
-            $diagnostics['searches'][] = [
-                'mode' => $policy->mode,
-                'subquestion' => $subquestion['key'],
-                'query' => mb_substr($subquestion['text'], 0, 200),
-                'expanded' => in_array($subquestion['key'], $expandKeys, true),
-                'results' => count($result['results']),
-                'ms' => $result['timings_ms']['total'] ?? null,
-            ];
-            $diagnostics['skipped_assets'] = array_values(array_unique(array_merge(
-                $diagnostics['skipped_assets'] ?? [], $result['skipped_assets'],
-            )));
+            $key = $subquestion['key'];
+            $contract = $contracts[$key] ?? null;
+            $topK = in_array($key, $expandKeys, true) ? $policy->expansionTopK : $policy->topK;
+            $streams[$key] = [];
 
-            foreach ($result['results'] as $candidate) {
-                foreach ($unitizer->unitsForChunk($candidate['chunk'], [
-                    'branch' => 'subquestion',
-                    'subquestion' => $subquestion['key'],
-                    'final_rank' => $candidate['final_rank'] ?? null,
-                    'components' => array_keys($candidate['components'] ?? []),
-                ]) as $unit) {
-                    $streams[$subquestion['key']][] = $unit;
+            // Bounded deterministic multi-query retrieval: up to 4
+            // variants per subquestion (original, normalized content,
+            // relation-aware, state-opposite). NOT an autonomous loop —
+            // the variant set is fixed before any search runs.
+            $variants = $contract !== null
+                ? $this->reformulator->variants($contract)
+                : [$subquestion['text']];
+
+            // Quote-location subquestions get an exact-first pass on the
+            // extracted literal.
+            if ($contract?->taskType === TaskContract::QUOTE_LOCATION) {
+                $phrase = $this->classifier->extractQuotedPhrase($subquestion['text']) ?? $subquestion['text'];
+
+                if (mb_strlen($phrase) <= (int) config('mnemosyne.retrieval.search.max_exact_phrase_chars')) {
+                    $exact = $this->search->search($generation, $assetIds, $phrase, 'exact', $topK, false);
+                    $diagnostics['searches'][] = ['mode' => 'exact', 'subquestion' => $key, 'query' => mb_substr($phrase, 0, 200), 'results' => count($exact['results']), 'ms' => $exact['timings_ms']['total'] ?? null];
+                    $this->collectIntoStream($streams[$key], $exact['results'], $unitizer, $key, 'exact_first');
+                }
+            }
+
+            foreach ($variants as $index => $variant) {
+                $result = $this->search->search($generation, $assetIds, $variant, $policy->mode, $topK, $policy->rerank);
+                $diagnostics['searches'][] = [
+                    'mode' => $policy->mode,
+                    'subquestion' => $key,
+                    'variant' => $index,
+                    'query' => mb_substr($variant, 0, 200),
+                    'expanded' => in_array($key, $expandKeys, true),
+                    'results' => count($result['results']),
+                    'ms' => $result['timings_ms']['total'] ?? null,
+                ];
+                $diagnostics['skipped_assets'] = array_values(array_unique(array_merge(
+                    $diagnostics['skipped_assets'] ?? [], $result['skipped_assets'],
+                )));
+
+                $this->collectIntoStream($streams[$key], $result['results'], $unitizer, $key, 'subquestion');
+            }
+        }
+
+        $this->expandNeighborhood($generation, $streams, $unitizer, $diagnostics);
+
+        return $this->assembleStreams($streams, $config, $diagnostics, interleave: true);
+    }
+
+    /** @param list<array> $results HybridSearchService candidates */
+    private function collectIntoStream(array &$stream, array $results, EvidenceUnitizer $unitizer, string $subquestionKey, string $branch): void
+    {
+        foreach ($results as $candidate) {
+            foreach ($unitizer->unitsForChunk($candidate['chunk'], [
+                'branch' => $branch,
+                'subquestion' => $subquestionKey,
+                'final_rank' => $candidate['final_rank'] ?? null,
+                'components' => array_keys($candidate['components'] ?? []),
+            ]) as $unit) {
+                $stream[] = $unit;
+            }
+        }
+    }
+
+    /**
+     * Bounded local-episode neighborhood: when one subquestion found
+     * nothing but a sibling subquestion has strong hits, the siblings'
+     * top chunks anchor a small ±window fetch of ADJACENT canonical
+     * chunks (same book, same generation) for the deficient
+     * subquestion. Multi-part questions about one local event often
+     * share a scene: the anchor locates it, the neighborhood supplies
+     * the siblings' evidence. Never scans the book; strict verification
+     * still decides what any of it proves.
+     *
+     * @param  array<string, list<EvidenceUnit>>  $streams
+     */
+    private function expandNeighborhood(RetrievalGeneration $generation, array &$streams, EvidenceUnitizer $unitizer, array &$diagnostics): void
+    {
+        $window = (int) config('mnemosyne.answers.retrieval.neighborhood_window', 2);
+        $maxAnchors = (int) config('mnemosyne.answers.retrieval.neighborhood_anchors', 2);
+
+        $deficient = array_keys(array_filter($streams, fn ($stream) => $stream === []));
+
+        if ($deficient === [] || $window < 1) {
+            return;
+        }
+
+        // Anchor chunks: first units of the non-empty sibling streams.
+        $anchorChunkIds = [];
+
+        foreach ($streams as $stream) {
+            foreach (array_slice($stream, 0, $maxAnchors) as $unit) {
+                if (isset($unit->retrievalMeta['chunk_public_id'])) {
+                    $anchorChunkIds[$unit->retrievalMeta['chunk_public_id']] = true;
                 }
             }
         }
 
-        return $this->assembleStreams($streams, $config, $diagnostics, interleave: true);
+        $anchorChunkIds = array_slice(array_keys($anchorChunkIds), 0, $maxAnchors);
+
+        if ($anchorChunkIds === []) {
+            return;
+        }
+
+        $anchors = RetrievalChunk::query()
+            ->whereIn('public_id', $anchorChunkIds)
+            ->get(['id', 'public_id', 'book_asset_id', 'ordinal']);
+
+        $fetched = 0;
+
+        foreach ($anchors as $anchor) {
+            $neighbors = RetrievalChunk::query()
+                ->with(['spans', 'asset'])
+                ->where('retrieval_generation_id', $generation->id)
+                ->where('book_asset_id', $anchor->book_asset_id)
+                ->whereBetween('ordinal', [$anchor->ordinal - $window, $anchor->ordinal + $window])
+                ->where('id', '!=', $anchor->id)
+                ->orderBy('ordinal')
+                ->get();
+
+            foreach ($neighbors as $chunk) {
+                $fetched++;
+
+                foreach ($deficient as $subquestionKey) {
+                    foreach ($unitizer->unitsForChunk($chunk, [
+                        'branch' => 'neighborhood',
+                        'subquestion' => $subquestionKey,
+                        'anchor_chunk' => $anchor->public_id,
+                    ]) as $unit) {
+                        $streams[$subquestionKey][] = $unit;
+                    }
+                }
+            }
+        }
+
+        $diagnostics['neighborhood'] = [
+            'deficient_subquestions' => $deficient,
+            'anchor_chunks' => $anchorChunkIds,
+            'window' => $window,
+            'chunks_fetched' => $fetched,
+        ];
     }
 
     /** @param list<array> $results HybridSearchService candidates */

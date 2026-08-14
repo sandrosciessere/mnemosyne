@@ -240,6 +240,15 @@ return [
             'min_sufficient_units' => (int) env('MNEMOSYNE_ANSWER_MIN_UNITS', 3),
         ],
 
+        'retrieval' => [
+            // Bounded deterministic query variants per subquestion.
+            'max_query_variants' => (int) env('MNEMOSYNE_ANSWER_QUERY_VARIANTS', 4),
+            // Local-episode neighborhood: ± chunks fetched around sibling
+            // anchors for subquestions with no hits of their own.
+            'neighborhood_window' => (int) env('MNEMOSYNE_ANSWER_NEIGHBORHOOD_WINDOW', 2),
+            'neighborhood_anchors' => (int) env('MNEMOSYNE_ANSWER_NEIGHBORHOOD_ANCHORS', 2),
+        ],
+
         // queued | retrieving | ... jobs run here (Horizon supervisor).
         'queue' => env('MNEMOSYNE_ANSWERS_QUEUE', 'answers'),
         'job_timeout_seconds' => (int) env('MNEMOSYNE_ANSWER_JOB_TIMEOUT', 1500),
