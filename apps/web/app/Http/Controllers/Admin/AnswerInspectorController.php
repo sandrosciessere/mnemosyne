@@ -65,6 +65,8 @@ class AnswerInspectorController extends Controller
                 // for "the model certified it, the application refused".
                 'gate_result' => $claim->gate_result,
                 'gate_reason_code' => $claim->gate_reason_code,
+                'relevance_result' => $claim->relevance_result,
+                'relevance_reason_code' => $claim->relevance_reason_code,
                 'evidence_keys' => $claim->evidence->pluck('evidence_key')->all(),
                 'support_atoms' => $claim->evidence
                     ->flatMap(fn ($evidence) => array_column(

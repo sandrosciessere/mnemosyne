@@ -72,12 +72,15 @@ class VerifierOutputValidator
         $reason = $raw['reason_code'] ?? null;
         $reason = is_string($reason) ? mb_substr(trim($reason), 0, 64) : null;
 
+        $answers = $raw['answers_subquestion'] ?? null;
+
         return new VerificationResult(
             $claim->claimKey,
             $level,
             $atomKeys,
             array_values(array_unique($evidenceKeys)),
             $reason === '' ? null : $reason,
+            is_bool($answers) ? $answers : null,
         );
     }
 

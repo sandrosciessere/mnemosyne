@@ -62,7 +62,7 @@ class AnswerPipelineTest extends TestCase
         $this->assertSame('query-intent 1.1.0', $run->query_classifier_version);
         $this->assertSame('evidence-unitizer 1.1.0', $run->evidence_unitizer_version);
         $this->assertSame('grounded-generator 1.1.0', $run->generator_prompt_version);
-        $this->assertSame('grounded-verifier 1.1.0', $run->verifier_prompt_version);
+        $this->assertSame('grounded-verifier 1.2.0', $run->verifier_prompt_version);
         $this->assertIsArray($run->timings_ms);
         $this->assertArrayHasKey('generation', $run->timings_ms);
         $this->assertArrayHasKey('verification', $run->timings_ms);
@@ -125,7 +125,9 @@ class AnswerPipelineTest extends TestCase
         $run->refresh();
 
         $this->assertSame(AnswerRunStatus::Ready, $run->status);
-        $this->assertSame(AnswerOutcome::PartiallyAnswered, $run->outcome);
+        // Coverage semantics: the surviving claim answers the whole
+        // simple question — rejected EXTRA claims never force partial.
+        $this->assertSame(AnswerOutcome::Answered, $run->outcome);
 
         $rejected = $run->claims->firstWhere('claim_key', 'CL2');
         $this->assertSame(ClaimVerificationStatus::Rejected, $rejected->verification_status);

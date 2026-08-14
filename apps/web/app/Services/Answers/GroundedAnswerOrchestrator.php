@@ -6,6 +6,7 @@ use App\Enums\AnswerOutcome;
 use App\Enums\AnswerRunStatus;
 use App\Enums\ClaimVerificationStatus;
 use App\Enums\ConversationMessageRole;
+use App\Enums\QueryIntent;
 use App\Enums\VerifierSupportLevel;
 use App\Exceptions\Answers\AnswerProviderException;
 use App\Exceptions\Answers\ProviderInvalidOutputException;
@@ -25,35 +26,37 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 /**
- * The grounded answer pipeline (verifier-precision revision):
+ * The grounded answer pipeline (second corrective revision):
  *
- *   classify → decompose (bounded) → retrieval policy → EvidencePacket
- *   (per-subquestion for compound questions, + at most ONE bounded and
- *   FOCUSED expansion) → structured generation (+ one repair) →
- *   independent per-claim STRICT-ENTAILMENT verification (sentence
- *   atoms) → deterministic ClaimEvidenceGate → final epistemic labels →
- *   per-subquestion coverage → server-side citations → persistence.
+ *   well-formedness gate → decompose → TaskContract per subquestion →
+ *   capability gate (unsupported global/longitudinal/reveal tasks
+ *   short-circuit BEFORE generation) → task-aware multi-query
+ *   retrieval (+ neighborhood, + ONE focused expansion) → structured
+ *   generation → language enforcement → per-claim strict-entailment
+ *   verification (claim-local protocol robustness) → ClaimEvidenceGate
+ *   → ClaimRelevanceGate → TaskCoverageEvaluator → outcome from
+ *   MATERIAL TASK COVERAGE → persistence.
  *
- * Correctness invariants owned here:
- * - generator output is NEVER published unverified;
- * - the model verifier is NOT trusted alone: the application gate can
- *   reject a verifier-positive claim (verifier_positive/gate_rejected
- *   is auditable), and rejected claims are never displayed;
- * - unsupported subquestions surface as an honest partial answer —
- *   evidence for one part never manufactures an answer for another;
- * - citation numbers are server-assigned by first appearance, and every
- *   citation records the minimal verified CitationSpan atoms;
- * - conversation history is referential context only.
+ * Correctness contract owned here:
+ *   evidence must support the claim (ClaimEvidenceGate), the claim
+ *   must answer its subquestion (ClaimRelevanceGate), the surviving
+ *   claims must satisfy the requested task (TaskCoverageEvaluator),
+ *   unsupported capabilities are declared before expensive generation,
+ *   and rejected extra claims never make a complete answer "partial".
  */
 class GroundedAnswerOrchestrator
 {
     public function __construct(
         private readonly QueryIntentClassifier $classifier,
         private readonly QuestionDecomposer $decomposer,
+        private readonly TaskContractClassifier $contracts,
+        private readonly QuestionWellFormednessGate $wellFormedness,
         private readonly ResponseLanguageDetector $language,
         private readonly RetrievalPolicyResolver $policies,
         private readonly EvidencePacketBuilder $packets,
         private readonly ClaimEvidenceGate $gate,
+        private readonly ClaimRelevanceGate $relevance,
+        private readonly TaskCoverageEvaluator $coverage,
         private readonly AnswerProviderFactory $providers,
     ) {}
 
@@ -83,31 +86,36 @@ class GroundedAnswerOrchestrator
         $pipelineStart = hrtime(true);
         $config = config('mnemosyne.answers');
 
-        // ── Classification + decomposition + language ──────────────
+        // ── Understanding: well-formedness, decomposition, contracts ─
         $t = hrtime(true);
         $assetIds = $run->scopeAssets()->pluck('book_assets.id')->all();
-        $intent = $this->classifier->classify($run->question, count($assetIds));
+        $languageCode = $this->language->detect($run->question);
+
+        $wellFormed = $this->wellFormedness->check($run->question);
         $subquestions = $this->decomposer->decompose($run->question);
         $isCompound = count($subquestions) > 1;
-        $languageCode = $this->language->detect($run->question);
-        $policy = $this->policies->resolve($intent, count($assetIds));
 
-        // A compound question whose parts include an identity/reveal
-        // part inherits the capability notice from the strictest part.
+        /** @var array<string, TaskContract> $contracts */
+        $contracts = [];
+
+        foreach ($subquestions as $subquestion) {
+            $contracts[$subquestion['key']] = $this->contracts->classify($subquestion['key'], $subquestion['text']);
+        }
+
+        $intent = $this->classifier->classify($run->question, count($assetIds));
+
+        // Capability aggregation: the strictest material subquestion
+        // decides the run-level notice; siblings keep their own level.
         $capabilityNotice = $intent->capabilityNotice();
 
-        if ($isCompound && $capabilityNotice === null) {
-            foreach ($subquestions as $subquestion) {
-                $subIntent = $this->classifier->classify($subquestion['text'], count($assetIds));
-
-                if ($subIntent->capabilityNotice() !== null) {
-                    $capabilityNotice = $subIntent->capabilityNotice();
-                    break;
-                }
+        foreach ($contracts as $contract) {
+            if ($capabilityNotice === null && $contract->capabilityNotice !== null) {
+                $capabilityNotice = $contract->capabilityNotice;
             }
         }
 
-        $timings['classification'] = $this->ms($t);
+        $policy = $this->policies->resolve($intent, count($assetIds));
+        $timings['understanding'] = $this->ms($t);
 
         $run->forceFill([
             'status' => AnswerRunStatus::Retrieving,
@@ -121,32 +129,62 @@ class GroundedAnswerOrchestrator
             'verifier_prompt_version' => AnswerPromptBuilder::VERIFIER_PROMPT_VERSION,
             'question_decomposer_version' => QuestionDecomposer::VERSION,
             'claim_gate_version' => ClaimEvidenceGate::VERSION,
+            'task_contract_version' => TaskContract::VERSION,
+            'claim_relevance_gate_version' => ClaimRelevanceGate::VERSION,
+            'coverage_evaluator_version' => TaskCoverageEvaluator::VERSION,
             'response_language' => $languageCode,
-            'subquestions' => $isCompound
-                ? array_map(fn ($sq) => $sq + ['status' => 'pending'], $subquestions)
-                : null,
+            'subquestions' => array_map(
+                fn ($sq) => $sq + ['status' => 'pending', 'contract' => $contracts[$sq['key']]->toArray()],
+                $subquestions,
+            ),
         ])->save();
 
-        // ── Retrieval + packet (one bounded, FOCUSED expansion) ─────
+        // ── Clarification short-circuit (cheap, before any retrieval) ─
+        if (! $wellFormed['well_formed']) {
+            $this->finishWithCoverage($run, AnswerOutcome::NeedsClarification, array_map(
+                fn ($sq) => ['key' => $sq['key'], 'text' => $sq['text'], 'status' => 'needs_clarification', 'diagnosis' => $wellFormed['reason']],
+                $subquestions,
+            ), $timings, $pipelineStart);
+
+            return;
+        }
+
+        // ── Capability gate: unsupported tasks never reach the model ─
+        $supported = array_values(array_filter(
+            $subquestions,
+            fn ($sq) => $contracts[$sq['key']]->supportedInM3,
+        ));
+
+        if ($supported === []) {
+            $evaluation = $this->coverage->evaluate($subquestions, $contracts, []);
+            $this->finishWithCoverage($run, $evaluation['outcome'], $evaluation['subquestions'], $timings, $pipelineStart);
+
+            return;
+        }
+
+        // ── Task-aware retrieval (multi-query + neighborhood) ────────
         $t = hrtime(true);
         $generation = $run->generation;
 
-        $packet = $isCompound
-            ? $this->packets->buildForSubquestions($generation, $assetIds, $subquestions, $policy)
-            : $this->packets->build($generation, $assetIds, $run->question, $policy);
+        $useComparative = $intent === QueryIntent::ComparativeMultiBook && count($supported) === 1 && count($assetIds) >= 2;
+
+        $packet = $useComparative
+            ? $this->packets->build($generation, $assetIds, $run->question, $policy)
+            : $this->packets->buildForSubquestions($generation, $assetIds, $supported, $policy, $contracts);
         $timings['retrieval_and_packet'] = $this->ms($t);
         $timings['retrieval'] = $this->searchMs($packet);
 
+        // ── ONE focused expansion on the neediest SUPPORTED task ─────
         $minUnits = (int) $config['evidence']['min_sufficient_units'];
-        $expansionTarget = $this->expansionTarget($packet, $subquestions, $isCompound, $minUnits);
+        $expansionTarget = $this->expansionTarget($packet, $supported, ! $useComparative, $minUnits);
 
         if ($expansionTarget !== null) {
             $run->forceFill(['status' => AnswerRunStatus::ExpandingRetrieval])->save();
 
             $t = hrtime(true);
-            $expandedPacket = $isCompound
-                ? $this->packets->buildForSubquestions($generation, $assetIds, $subquestions, $policy, [$expansionTarget])
-                : $this->packets->build($generation, $assetIds, $run->question, $policy, expanded: true);
+            $expandedPacket = $useComparative
+                ? $this->packets->build($generation, $assetIds, $run->question, $policy, expanded: true)
+                : $this->packets->buildForSubquestions($generation, $assetIds, $supported, $policy, $contracts, [$expansionTarget]);
             $timings['retrieval_expansion'] = $this->ms($t);
 
             if ($expandedPacket->unitCount() > $packet->unitCount()) {
@@ -165,12 +203,13 @@ class GroundedAnswerOrchestrator
         $timings['evidence_persistence'] = $this->ms($t);
 
         if ($packet->isEmpty()) {
-            $this->finishInsufficient($run, $timings, $pipelineStart);
+            $evaluation = $this->coverage->evaluate($subquestions, $contracts, []);
+            $this->finishWithCoverage($run, AnswerOutcome::InsufficientEvidence, $evaluation['subquestions'], $timings, $pipelineStart);
 
             return;
         }
 
-        // ── Generation (one bounded repair on invalid output) ──────
+        // ── Generation (one bounded repair; timing survives failure) ─
         $generator = $this->providers->generator();
         $generatorIdentity = $generator->identity();
         $run->forceFill([
@@ -185,20 +224,28 @@ class GroundedAnswerOrchestrator
             packet: $packet,
             conversationContext: $this->conversationContext($run),
             languageName: $this->language->promptName($languageCode),
-            subquestions: $isCompound ? $subquestions : [],
+            subquestions: count($supported) > 1 ? $supported : [],
         );
 
         $t = hrtime(true);
-        $generated = $this->generateWithRepair($run, $request, $generator);
-        $timings['generation'] = $this->ms($t);
+
+        try {
+            $generated = $this->generateWithRepair($run, $request, $generator);
+        } finally {
+            $timings['generation'] = $this->ms($t);
+        }
+
+        // ── Application-level language enforcement ───────────────────
+        $generated = $this->enforceLanguage($run, $request, $generator, $generated, $languageCode, $timings);
 
         if ($generated->status === 'insufficient_evidence' || $generated->claims === []) {
-            $this->finishInsufficient($run, $timings, $pipelineStart);
+            $evaluation = $this->coverage->evaluate($subquestions, $contracts, $this->statsFromPacketOnly($supported, $packet));
+            $this->finishWithCoverage($run, AnswerOutcome::InsufficientEvidence, $evaluation['subquestions'], $timings, $pipelineStart);
 
             return;
         }
 
-        // ── Independent verification + application gate ────────────
+        // ── Verification + gates (claim-local robustness) ────────────
         $verifier = $this->providers->verifier();
         $verifierIdentity = $verifier->identity();
         $run->forceFill([
@@ -208,87 +255,257 @@ class GroundedAnswerOrchestrator
             'verifier_revision' => $verifierIdentity->revision,
         ])->save();
 
-        $t = hrtime(true);
-        $verdicts = [];
-        $gateResults = [];
-        $gateMs = 0.0;
-
-        foreach ($generated->claims as $claim) {
-            $verdicts[$claim->claimKey] = $this->verifyWithRetry($run, $packet, $claim, $verifier);
-
-            $g = hrtime(true);
-            $gateResults[$claim->claimKey] = $this->gate->evaluate($claim, $verdicts[$claim->claimKey], $packet);
-            $gateMs += $this->ms($g);
-
-            // ONE bounded gate-informed retry: the verifier answered
-            // direct but selected atoms that do not state the claim
-            // (wrong sentence picked). Tell it exactly that; the second
-            // verdict — whatever it is — is final.
-            if (($gateResults[$claim->claimKey]['reason'] ?? null) === ClaimEvidenceGate::REASON_DIRECT_NOT_ESTABLISHED) {
-                Log::info('answers.gate_informed_reverify', ['run' => $run->public_id, 'claim' => $claim->claimKey]);
-
-                try {
-                    $verdicts[$claim->claimKey] = $verifier->verify(
-                        $run->question,
-                        $packet,
-                        $claim,
-                        'the atoms you selected do not explicitly state this claim. Select the exact sentence atom(s) that state it (they may be elsewhere in the evidence), or answer "none".',
-                    );
-
-                    $g = hrtime(true);
-                    $gateResults[$claim->claimKey] = $this->gate->evaluate($claim, $verdicts[$claim->claimKey], $packet);
-                    $gateMs += $this->ms($g);
-                } catch (ProviderInvalidOutputException) {
-                    // Keep the original rejected verdict — never fail the
-                    // whole run for a rescue attempt.
-                }
-            }
+        $subquestionTexts = [];
+        foreach ($subquestions as $sq) {
+            $subquestionTexts[$sq['key']] = $sq['text'];
         }
-        $timings['claim_gate'] = round($gateMs, 1);
-        $timings['verification'] = $this->ms($t) - $timings['claim_gate'];
+        $defaultSubquestion = count($supported) === 1 ? $supported[0]['key'] : null;
 
-        // ── Labels + coverage + citations + persistence ────────────
         $t = hrtime(true);
-        $outcome = $this->persistClaims($run, $packet, $generated, $verdicts, $gateResults, $subquestions, $isCompound);
+        $claimResults = [];
+        $gateMs = 0.0;
+        $protocolErrors = 0;
+
+        try {
+            foreach ($generated->claims as $claim) {
+                $subquestionKey = $claim->subquestion ?? $defaultSubquestion;
+                $contract = $contracts[$subquestionKey] ?? reset($contracts);
+
+                [$verdict, $protocolError] = $this->verifyClaimRobustly(
+                    $run, $packet, $claim, $verifier, $subquestionTexts[$subquestionKey] ?? null,
+                );
+
+                if ($protocolError) {
+                    $protocolErrors++;
+                }
+
+                $g = hrtime(true);
+                $gateResult = $this->gate->evaluate($claim, $verdict, $packet);
+
+                // ONE bounded gate-informed retry when a direct verdict
+                // picked non-asserting atoms (unchanged from pass 1).
+                if (! $protocolError && ($gateResult['reason'] ?? null) === ClaimEvidenceGate::REASON_DIRECT_NOT_ESTABLISHED) {
+                    $gateMs += $this->ms($g);
+                    Log::info('answers.gate_informed_reverify', ['run' => $run->public_id, 'claim' => $claim->claimKey]);
+
+                    try {
+                        $verdict = $verifier->verify(
+                            $run->question, $packet, $claim,
+                            'the atoms you selected do not explicitly state this claim. Select the exact sentence atom(s) that state it (they may be elsewhere in the evidence), or answer "none".',
+                            $subquestionTexts[$subquestionKey] ?? null,
+                        );
+                        $g = hrtime(true);
+                        $gateResult = $this->gate->evaluate($claim, $verdict, $packet);
+                    } catch (ProviderInvalidOutputException) {
+                        // keep the original rejected verdict
+                        $g = hrtime(true);
+                    }
+                }
+
+                // Relevance: only claims that survived the evidence gate.
+                $relevanceResult = ['result' => null, 'reason' => null];
+
+                if ($gateResult['result'] === 'passed' && VerifierSupportLevel::from($verdict->supportLevel)->toEpistemicLabel() !== null) {
+                    $relevanceResult = $this->relevance->evaluate($claim, $verdict, $contract, $packet);
+                }
+
+                $gateMs += $this->ms($g);
+
+                $claimResults[$claim->claimKey] = [
+                    'verdict' => $verdict,
+                    'gate' => $gateResult,
+                    'relevance' => $relevanceResult,
+                    'protocol_error' => $protocolError,
+                    'subquestion' => $subquestionKey,
+                ];
+            }
+        } finally {
+            $timings['claim_gate'] = round($gateMs, 1);
+            $timings['verification'] = round($this->ms($t) - $gateMs, 1);
+        }
+
+        // Systemic verifier failure: EVERY claim died on protocol errors.
+        if ($protocolErrors > 0 && $protocolErrors === count($generated->claims)) {
+            throw new AnswerProviderException(
+                'VERIFIER_PROTOCOL_ERROR',
+                'The verifier returned malformed output for every claim.',
+            );
+        }
+
+        // ── Persistence + coverage-based outcome ─────────────────────
+        $t = hrtime(true);
+        $perSubquestion = $this->persistClaims($run, $packet, $generated, $claimResults, $supported);
         $timings['claim_persistence'] = $this->ms($t);
 
-        if ($outcome === null) {
-            $this->finishInsufficient($run, $timings, $pipelineStart);
-
-            return;
-        }
+        $evaluation = $this->coverage->evaluate($subquestions, $contracts, $perSubquestion);
 
         $this->appendAssistantMessage($run);
 
         $timings['total'] = $this->ms($pipelineStart);
         $run->forceFill([
-            'status' => AnswerRunStatus::Ready,
-            'outcome' => $outcome,
+            'status' => $evaluation['outcome'] === AnswerOutcome::InsufficientEvidence
+                ? AnswerRunStatus::Insufficient
+                : AnswerRunStatus::Ready,
+            'outcome' => $evaluation['outcome'],
+            'subquestions' => $evaluation['subquestions'],
             'timings_ms' => array_map(fn ($v) => round($v, 1), $timings),
             'completed_at' => now(),
         ])->save();
     }
 
     /**
-     * The single bounded expansion is FOCUSED: for compound questions
-     * it targets the first subquestion whose packet share is too thin
-     * instead of blindly raising the global Top-K.
+     * Claim-local verifier robustness: blind retry on the first invalid
+     * output, then ONE candidate-listing repair, then a synthetic
+     * `none` verdict (VERIFIER_INVALID_SUPPORT_ATOM) so ONE malformed
+     * claim never destroys the rest of the answer. Transport failures
+     * (unavailable/timeout) remain run-fatal and propagate.
+     *
+     * @return array{0: VerificationResult, 1: bool} verdict + protocol-error flag
      */
-    private function expansionTarget(EvidencePacket $packet, array $subquestions, bool $isCompound, int $minUnits): ?string
+    private function verifyClaimRobustly(
+        GroundedAnswerRun $run,
+        EvidencePacket $packet,
+        GeneratedClaimDraft $claim,
+        Providers\VerifierProvider $verifier,
+        ?string $subquestionText,
+    ): array {
+        try {
+            return [$verifier->verify($run->question, $packet, $claim, null, $subquestionText), false];
+        } catch (ProviderInvalidOutputException) {
+            // Candidate-listing repair: enumerate the VALID atom IDs of
+            // the units the generator proposed (bounded), so a bare
+            // "E11" answer or a fabricated ID gets one precise chance.
+            $candidates = [];
+
+            foreach ($claim->evidenceKeys as $unitKey) {
+                foreach (array_keys($packet->units[$unitKey]->atoms ?? []) as $atomKey) {
+                    $candidates[] = $unitKey.'.'.$atomKey;
+                }
+            }
+
+            $candidates = array_slice($candidates, 0, 24);
+
+            Log::info('answers.verifier_atom_repair', ['run' => $run->public_id, 'claim' => $claim->claimKey]);
+
+            try {
+                return [$verifier->verify(
+                    $run->question, $packet, $claim,
+                    'your previous answer used an invalid or unit-level atom ID. Valid atom IDs for the proposed evidence are: '
+                    .implode(', ', $candidates)
+                    .'. Select one or more of these exact IDs (or any other valid unit.atom ID from the evidence), or answer "none".',
+                    $subquestionText,
+                ), false];
+            } catch (ProviderInvalidOutputException) {
+                return [new VerificationResult(
+                    $claim->claimKey,
+                    'none',
+                    [],
+                    [],
+                    'VERIFIER_INVALID_SUPPORT_ATOM',
+                ), true];
+            }
+        }
+    }
+
+    /**
+     * Post-generation application-level language enforcement: claims in
+     * the wrong language get ONE regeneration with explicit feedback;
+     * still-wrong claims are dropped (never displayed). Proper nouns and
+     * short answers are exempt via a length floor.
+     */
+    private function enforceLanguage(
+        GroundedAnswerRun $run,
+        GenerationRequest $request,
+        Providers\GenerationProvider $generator,
+        GenerationResult $generated,
+        string $languageCode,
+        array &$timings,
+    ): GenerationResult {
+        $mismatched = $this->mismatchedClaims($generated, $languageCode);
+
+        if ($mismatched === []) {
+            return $generated;
+        }
+
+        Log::info('answers.language_repair', ['run' => $run->public_id, 'claims' => $mismatched]);
+
+        $t = hrtime(true);
+
+        try {
+            $regenerated = $generator->generate($request->withRepairFeedback(
+                'some claims were not written in '.$this->language->promptName($languageCode)
+                .'. Rewrite ALL claims in '.$this->language->promptName($languageCode)
+                .' (proper nouns and short source quotes may stay as-is).',
+            ));
+        } catch (AnswerProviderException) {
+            $regenerated = null;
+        } finally {
+            $timings['language_repair'] = $this->ms($t);
+        }
+
+        if ($regenerated !== null && $this->mismatchedClaims($regenerated, $languageCode) === []) {
+            return $regenerated;
+        }
+
+        // Drop still-mismatched claims from the better of the two outputs.
+        $source = $regenerated !== null && count($this->mismatchedClaims($regenerated, $languageCode)) < count($mismatched)
+            ? $regenerated
+            : $generated;
+        $bad = array_flip($this->mismatchedClaims($source, $languageCode));
+        $kept = array_values(array_filter($source->claims, fn ($claim) => ! isset($bad[$claim->claimKey])));
+
+        return new GenerationResult($kept === [] ? 'insufficient_evidence' : $source->status, $kept);
+    }
+
+    /** @return list<string> claim keys whose language mismatches */
+    private function mismatchedClaims(GenerationResult $generated, string $languageCode): array
     {
-        if (! $isCompound) {
+        $mismatched = [];
+
+        foreach ($generated->claims as $claim) {
+            if (mb_strlen($claim->text) >= 40 && $this->language->detect($claim->text) !== $languageCode) {
+                $mismatched[] = $claim->claimKey;
+            }
+        }
+
+        return $mismatched;
+    }
+
+    /**
+     * The single bounded expansion targets the neediest SUPPORTED
+     * subquestion (never a capability-limited one).
+     */
+    private function expansionTarget(EvidencePacket $packet, array $supported, bool $perSubquestion, int $minUnits): ?string
+    {
+        if (! $perSubquestion) {
             return $packet->unitCount() < $minUnits ? 'ALL' : null;
         }
 
-        $perSubquestion = $packet->stats['per_subquestion'] ?? [];
+        $perSubquestionStats = $packet->stats['per_subquestion'] ?? [];
 
-        foreach ($subquestions as $subquestion) {
-            if (($perSubquestion[$subquestion['key']] ?? 0) < max(1, intdiv($minUnits, 2))) {
+        foreach ($supported as $subquestion) {
+            if (($perSubquestionStats[$subquestion['key']] ?? 0) < max(1, intdiv($minUnits, 2))) {
                 return $subquestion['key'];
             }
         }
 
         return null;
+    }
+
+    /** Packet-only per-SQ stats when generation produced nothing. */
+    private function statsFromPacketOnly(array $supported, EvidencePacket $packet): array
+    {
+        $stats = [];
+
+        foreach ($supported as $subquestion) {
+            $stats[$subquestion['key']] = [
+                'surviving' => 0, 'generated' => 0, 'verifier_rejected' => 0,
+                'gate_rejected' => 0, 'relevance_rejected' => 0, 'protocol_errors' => 0,
+                'packet_units' => $packet->stats['per_subquestion'][$subquestion['key']] ?? $packet->unitCount(),
+            ];
+        }
+
+        return $stats;
     }
 
     private function generateWithRepair(
@@ -305,30 +522,9 @@ class GroundedAnswerOrchestrator
         }
     }
 
-    private function verifyWithRetry(
-        GroundedAnswerRun $run,
-        EvidencePacket $packet,
-        GeneratedClaimDraft $claim,
-        Providers\VerifierProvider $verifier,
-    ): VerificationResult {
-        try {
-            return $verifier->verify($run->question, $packet, $claim);
-        } catch (ProviderInvalidOutputException $exception) {
-            // One bounded retry for a malformed verifier verdict (cheap:
-            // the evidence prefix is KV-cached); a second failure is an
-            // honest VERIFIER_INVALID_OUTPUT pipeline failure — claims
-            // are NEVER published unverified.
-            Log::info('answers.verifier_retry', ['run' => $run->public_id, 'claim' => $claim->claimKey]);
-
-            return $verifier->verify($run->question, $packet, $claim);
-        }
-    }
-
     private function persistEvidence(GroundedAnswerRun $run, EvidencePacket $packet): void
     {
         DB::transaction(function () use ($run, $packet) {
-            // Expansion rebuilds the packet: replace prior rows (only
-            // reachable before claims exist, so no pivot rows are lost).
             GroundedAnswerEvidence::query()->where('grounded_answer_run_id', $run->id)->delete();
 
             $ordinal = 0;
@@ -366,46 +562,60 @@ class GroundedAnswerOrchestrator
     }
 
     /**
-     * Final labels (verifier verdict AND application gate), citation
-     * numbering by first appearance, CitationSpan atoms on the
-     * claim↔evidence relation, per-subquestion coverage.
+     * Persists claims with all three gate verdicts and returns the
+     * per-subquestion coverage stats for the TaskCoverageEvaluator.
      *
-     * @param  array<string, VerificationResult>  $verdicts
-     * @param  array<string, array{result: string, reason: ?string, claim_type: string}>  $gateResults
-     * @return AnswerOutcome|null null when no claim survived
+     * @param  array<string, array{verdict: VerificationResult, gate: array,
+     *                             relevance: array, protocol_error: bool, subquestion: ?string}>  $claimResults
+     * @return array<string, array> per-subquestion stats
      */
     private function persistClaims(
         GroundedAnswerRun $run,
         EvidencePacket $packet,
         GenerationResult $generated,
-        array $verdicts,
-        array $gateResults,
-        array $subquestions,
-        bool $isCompound,
-    ): ?AnswerOutcome {
+        array $claimResults,
+        array $supported,
+    ): array {
         $evidenceByKey = GroundedAnswerEvidence::query()
             ->where('grounded_answer_run_id', $run->id)
             ->get()
             ->keyBy('evidence_key');
 
-        return DB::transaction(function () use ($run, $packet, $generated, $verdicts, $gateResults, $evidenceByKey, $subquestions, $isCompound) {
+        $perSubquestion = $this->statsFromPacketOnly($supported, $packet);
+
+        DB::transaction(function () use ($run, $packet, $generated, $claimResults, $evidenceByKey, &$perSubquestion) {
             $citationCounter = 0;
-            $anyRejected = false;
-            $verifiedCount = 0;
-            $answeredSubquestions = [];
 
             foreach ($generated->claims as $ordinal => $draft) {
-                $verdict = $verdicts[$draft->claimKey];
-                $gateResult = $gateResults[$draft->claimKey];
-                // The gate may promote an atomic strong verdict to
-                // direct when its structural check CONFIRMED explicit
-                // predication (auditable via gate_reason_code); the raw
-                // verifier level stays persisted unmodified.
+                $result = $claimResults[$draft->claimKey];
+                $verdict = $result['verdict'];
+                $gateResult = $result['gate'];
+                $relevanceResult = $result['relevance'];
+                $subquestionKey = $result['subquestion'];
+
                 $level = VerifierSupportLevel::from(
                     $gateResult['final_level_override'] ?? $verdict->supportLevel,
                 );
                 $finalLabel = $level->toEpistemicLabel();
-                $verified = $finalLabel !== null && $gateResult['result'] === 'passed';
+                $verified = $finalLabel !== null
+                    && $gateResult['result'] === 'passed'
+                    && $relevanceResult['result'] === 'passed';
+
+                if ($subquestionKey !== null && isset($perSubquestion[$subquestionKey])) {
+                    $perSubquestion[$subquestionKey]['generated']++;
+
+                    if ($result['protocol_error']) {
+                        $perSubquestion[$subquestionKey]['protocol_errors']++;
+                    } elseif ($verified) {
+                        $perSubquestion[$subquestionKey]['surviving']++;
+                    } elseif ($relevanceResult['result'] === 'rejected') {
+                        $perSubquestion[$subquestionKey]['relevance_rejected']++;
+                    } elseif ($gateResult['result'] === 'rejected' && $verdict->supportLevel !== 'none') {
+                        $perSubquestion[$subquestionKey]['gate_rejected']++;
+                    } else {
+                        $perSubquestion[$subquestionKey]['verifier_rejected']++;
+                    }
+                }
 
                 $claim = new GroundedAnswerClaim;
                 $claim->forceFill([
@@ -414,7 +624,7 @@ class GroundedAnswerOrchestrator
                     'claim_key' => $draft->claimKey,
                     'claim_text' => $draft->text,
                     'claim_type' => $gateResult['claim_type'],
-                    'subquestion_key' => $draft->subquestion,
+                    'subquestion_key' => $subquestionKey,
                     'generator_suggested_label' => $draft->suggestedLabel,
                     'final_label' => $verified ? $finalLabel->value : null,
                     'verification_status' => $verified
@@ -424,35 +634,22 @@ class GroundedAnswerOrchestrator
                     'verifier_reason_code' => $verdict->reasonCode,
                     'gate_result' => $gateResult['result'],
                     'gate_reason_code' => $gateResult['reason'],
+                    'relevance_result' => $relevanceResult['result'],
+                    'relevance_reason_code' => $relevanceResult['reason'],
                 ])->save();
 
                 if (! $verified) {
-                    $anyRejected = true;
-
                     continue;
                 }
 
-                $verifiedCount++;
-
-                if ($draft->subquestion !== null) {
-                    $answeredSubquestions[$draft->subquestion] = true;
-                }
-
-                // Attach evidence with the minimal verified atom spans
-                // (the gate may have substituted a structurally
-                // confirmed sibling atom).
                 $effectiveAtomKeys = $gateResult['atom_keys_override'] ?? $verdict->supportedAtomKeys;
                 $atomsByUnit = [];
 
                 foreach ($effectiveAtomKeys as $atomKey) {
-                    $unitKey = EvidencePacket::unitKeyOf($atomKey);
-                    $atomsByUnit[$unitKey][] = $atomKey;
+                    $atomsByUnit[EvidencePacket::unitKeyOf($atomKey)][] = $atomKey;
                 }
 
-                $effectiveEvidenceKeys = array_values(array_unique(array_map(
-                    fn ($atomKey) => EvidencePacket::unitKeyOf($atomKey),
-                    $effectiveAtomKeys,
-                )));
+                $effectiveEvidenceKeys = array_keys($atomsByUnit);
 
                 foreach ($effectiveEvidenceKeys as $key) {
                     $evidence = $evidenceByKey->get($key);
@@ -470,39 +667,12 @@ class GroundedAnswerOrchestrator
                     ]);
                 }
             }
-
-            if ($verifiedCount === 0) {
-                if ($isCompound) {
-                    $this->persistSubquestionCoverage($run, $subquestions, []);
-                }
-
-                return null;
-            }
-
-            if ($isCompound) {
-                $this->persistSubquestionCoverage($run, $subquestions, $answeredSubquestions);
-
-                $unanswered = count(array_filter(
-                    $subquestions,
-                    fn ($sq) => ! isset($answeredSubquestions[$sq['key']]),
-                ));
-
-                if ($unanswered > 0) {
-                    return AnswerOutcome::PartiallyAnswered;
-                }
-            }
-
-            return ($generated->status === 'partially_answered' || $anyRejected)
-                ? AnswerOutcome::PartiallyAnswered
-                : AnswerOutcome::Answered;
         });
+
+        return $perSubquestion;
     }
 
     /**
-     * Minimal verified CitationSpans: absolute canonical/UTF-16 offsets
-     * of the selected atoms (text is derivable from the evidence
-     * excerpt via offsets — not duplicated).
-     *
      * @param  list<string>  $atomKeys
      * @return list<array{key: string, canonical_start: int, canonical_end: int, utf16_start: int, utf16_end: int}>
      */
@@ -527,22 +697,8 @@ class GroundedAnswerOrchestrator
         return $spans;
     }
 
-    private function persistSubquestionCoverage(GroundedAnswerRun $run, array $subquestions, array $answered): void
-    {
-        $run->forceFill([
-            'subquestions' => array_map(fn ($sq) => [
-                'key' => $sq['key'],
-                'text' => $sq['text'],
-                'status' => isset($answered[$sq['key']]) ? 'answered' : 'unanswered',
-            ], $subquestions),
-        ])->save();
-    }
-
     /**
-     * Referential conversation context: the PREVIOUS USER QUESTIONS
-     * only (bounded). Assistant prose is deliberately excluded — prior
-     * model output must never be able to become evidence for a later
-     * claim.
+     * Referential conversation context: previous USER questions only.
      */
     private function conversationContext(GroundedAnswerRun $run): ?string
     {
@@ -567,14 +723,26 @@ class GroundedAnswerOrchestrator
         return $previous->map(fn ($q, $i) => 'Previous question '.($i + 1).': '.mb_substr((string) $q, 0, 300))->implode("\n");
     }
 
-    private function finishInsufficient(GroundedAnswerRun $run, array $timings, int|float $pipelineStart): void
-    {
+    /**
+     * Terminal non-failure outcomes with per-subquestion coverage rows
+     * (clarification, capability-limited, insufficient, ready).
+     */
+    private function finishWithCoverage(
+        GroundedAnswerRun $run,
+        AnswerOutcome $outcome,
+        array $subquestionRows,
+        array $timings,
+        int|float $pipelineStart,
+    ): void {
         $this->appendAssistantMessage($run);
 
         $timings['total'] = $this->ms($pipelineStart);
         $run->forceFill([
-            'status' => AnswerRunStatus::Insufficient,
-            'outcome' => AnswerOutcome::InsufficientEvidence,
+            'status' => $outcome === AnswerOutcome::InsufficientEvidence
+                ? AnswerRunStatus::Insufficient
+                : AnswerRunStatus::Ready,
+            'outcome' => $outcome,
+            'subquestions' => $subquestionRows,
             'timings_ms' => array_map(fn ($v) => round($v, 1), $timings),
             'completed_at' => now(),
         ])->save();

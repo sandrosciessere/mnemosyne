@@ -149,8 +149,32 @@ class ClaimEvidenceGate
 
             $entailmentCertified = in_array((string) $verdict->reasonCode, self::ENTAILMENT_REASONS, true);
 
-            if ($independentNodes < 2 && ! $entailmentCertified) {
+            if ($independentNodes < 2 && ! $entailmentCertified && $claimType !== ClaimTypeClassifier::GENERAL) {
                 return $this->rejected($claimType, self::REASON_INSUFFICIENT_INDEPENDENT);
+            }
+
+            // Direct-label calibration for explicitly stated facts
+            // (mechanisms, descriptions): a conservative model often
+            // answers "strong" for a claim that merely RESTATES its
+            // atoms. When the claim is a faithful restatement — nearly
+            // all its content stems appear in the selected atoms — and
+            // it is NOT a causal/interpretive synthesis, promote to
+            // Fatto testuale, auditable via the gate reason. General
+            // single-node strong claims that are NOT faithful
+            // restatements still need independence.
+            if (in_array($claimType, [ClaimTypeClassifier::GENERAL], true)) {
+                if ($this->isFaithfulRestatement($claim->text, $atoms)) {
+                    return [
+                        'result' => 'passed',
+                        'reason' => self::REASON_DIRECT_STRUCTURALLY_CONFIRMED,
+                        'claim_type' => $claimType,
+                        'final_level_override' => 'direct',
+                    ];
+                }
+
+                if ($independentNodes < 2 && ! $entailmentCertified) {
+                    return $this->rejected($claimType, self::REASON_INSUFFICIENT_INDEPENDENT);
+                }
             }
         }
 
@@ -218,7 +242,41 @@ class ClaimEvidenceGate
                 || preg_match('/\b'.$s.'[\p{L}\']*\s*,\s*[^,;.!?]{0,50}'.$v.'/u', $atomsLower) === 1
                 || preg_match('/'.$v.'[^,;.!?]{0,50},\s*[^,;.!?]{0,20}\b'.$s.'/u', $atomsLower) === 1;
 
-            return $predicated ? 'confirmed' : 'refuted';
+            if ($predicated) {
+                return 'confirmed';
+            }
+
+            // RELATION values ("X era la vicina di Y"): the source often
+            // expresses the relation non-copularly ("viveva nella casa
+            // accanto"). Accept when the atom names the subject AND uses
+            // a lexicon paraphrase of THAT relation. Identity values
+            // outside the relation lexicon (autista, cane, …) are
+            // unaffected.
+            foreach (TaskContractClassifier::RELATION_LEXICON as $terms) {
+                $valueInClass = false;
+
+                foreach ($terms as $term) {
+                    if (str_starts_with($this->normalize($value), $this->normalize(mb_substr($term, 0, mb_strlen($value))))
+                        && TaskContractClassifier::matchesTerm($this->normalize($claim), $this->normalize($term))) {
+                        $valueInClass = true;
+                        break;
+                    }
+                }
+
+                if (! $valueInClass) {
+                    continue;
+                }
+
+                if (preg_match('/\b'.$s.'/u', $atomsLower) === 1) {
+                    foreach ($terms as $term) {
+                        if (TaskContractClassifier::matchesTerm($this->normalize($atomsLower), $this->normalize($term))) {
+                            return 'confirmed';
+                        }
+                    }
+                }
+            }
+
+            return 'refuted';
         }
 
         // ── Naming claims: value name + one more claim content word ─
@@ -251,6 +309,47 @@ class ClaimEvidenceGate
         }
 
         return 'unverifiable'; // nothing structurally checkable — rely on the verifier
+    }
+
+    /**
+     * A claim is a faithful restatement when nearly all of its content
+     * stems (>=70%, minimum 3 stems) appear in the selected atoms —
+     * same language only (cross-language never promotes).
+     */
+    private function isFaithfulRestatement(string $claimText, array $atoms): bool
+    {
+        $atomText = implode(' ', array_column($atoms, 'text'));
+
+        if ($this->language->detect($claimText) !== $this->language->detect($atomText)) {
+            return false;
+        }
+
+        $stems = [];
+
+        foreach (preg_split('/[^\p{L}\']+/u', mb_strtolower($claimText), -1, PREG_SPLIT_NO_EMPTY) ?: [] as $word) {
+            if (mb_strlen($word) >= 5) {
+                // Cap at 6 so inflected forms match their base
+                // ("scendere" → "scende").
+                $stems[] = mb_substr($word, 0, max(4, min(mb_strlen($word) - 1, 6)));
+            }
+        }
+
+        $stems = array_unique($stems);
+
+        if (count($stems) < 3) {
+            return false;
+        }
+
+        $normalizedAtoms = $this->normalize($atomText);
+        $found = 0;
+
+        foreach ($stems as $stem) {
+            if (str_contains($normalizedAtoms, $this->normalize($stem))) {
+                $found++;
+            }
+        }
+
+        return $found / count($stems) >= 0.7;
     }
 
     /** Scan sibling atoms of the verifier-cited units for explicit predication. */

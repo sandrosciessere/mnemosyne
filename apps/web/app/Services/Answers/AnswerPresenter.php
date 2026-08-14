@@ -114,6 +114,9 @@ class AnswerPresenter
                 'unitizer_version' => $run->evidence_unitizer_version,
                 'decomposer_version' => $run->question_decomposer_version,
                 'claim_gate_version' => $run->claim_gate_version,
+                'task_contract_version' => $run->task_contract_version,
+                'claim_relevance_gate_version' => $run->claim_relevance_gate_version,
+                'coverage_evaluator_version' => $run->coverage_evaluator_version,
                 'generator' => [
                     'provider' => $run->generator_provider,
                     'model' => $run->generator_model,

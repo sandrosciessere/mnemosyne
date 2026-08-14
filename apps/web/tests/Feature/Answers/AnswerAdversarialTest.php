@@ -169,9 +169,11 @@ class AnswerAdversarialTest extends TestCase
         app(GroundedAnswerOrchestrator::class)->execute($run);
         $run->refresh();
 
+        // Claim-local invalid output on the ONLY claim = systemic
+        // protocol failure (never misreported as insufficient evidence).
         $this->assertSame(AnswerRunStatus::Failed, $run->status);
-        $this->assertSame('VERIFIER_INVALID_OUTPUT', $run->error_code);
-        $this->assertSame(['CL1', 'CL1'], $verifier->calls, 'exactly one bounded retry');
+        $this->assertSame('VERIFIER_PROTOCOL_ERROR', $run->error_code);
+        $this->assertSame(['CL1', 'CL1'], $verifier->calls, 'exactly one bounded candidate-listing repair');
         $this->assertCount(0, $run->claims);
     }
 

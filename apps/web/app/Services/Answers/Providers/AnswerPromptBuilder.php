@@ -29,7 +29,7 @@ class AnswerPromptBuilder
 {
     public const GENERATOR_PROMPT_VERSION = 'grounded-generator 1.1.0';
 
-    public const VERIFIER_PROMPT_VERSION = 'grounded-verifier 1.1.0';
+    public const VERIFIER_PROMPT_VERSION = 'grounded-verifier 1.2.0';
 
     public function systemPreamble(): string
     {
@@ -118,12 +118,15 @@ Return exactly this JSON shape:
 PROMPT;
     }
 
-    public function verifierInstruction(string $question, GeneratedClaimDraft $claim): string
+    public function verifierInstruction(string $question, GeneratedClaimDraft $claim, ?string $subquestionText = null): string
     {
         $keys = implode(', ', $claim->evidenceKeys);
+        $target = $subquestionText !== null && $subquestionText !== $question
+            ? "\nThis claim is meant to answer this specific part: {$subquestionText}"
+            : '';
 
         return <<<PROMPT
-QUESTION (for context): {$question}
+QUESTION (for context): {$question}{$target}
 
 You are now acting as an INDEPENDENT VERIFIER performing a STRICT ENTAILMENT CHECK. A separate process produced this claim:
 
@@ -154,12 +157,15 @@ Traps you must never fall into (these are all "none" unless another atom explici
 Positive examples (explicit statements ARE direct, in any language):
 - "Tomas, the son of Marek, entered" directly supports "Tomas is Marek's son";
 - "Tomas, il figlio di Marek, entrò nella sala" supporta direttamente "Tomas è il figlio di Marek";
-- "Argo was the oldest horse in the stable" directly supports "Argo is a horse".
+- "Argo was the oldest horse in the stable" directly supports "Argo is a horse";
+- an atom that states how something works ("la leva apre la valvola dopo tre minuti") directly supports a claim restating that mechanism — answer "direct", not "strong", when the claim is a faithful restatement of what the atoms say.
+
+Also report answers_subquestion: true only if this claim, by itself, actually answers (fully or partly) the question part above — a claim can be well supported by the text and still NOT answer what was asked (wrong attribute, wrong entity, background fact): report false in that case.
 
 reason_code: one short SCREAMING_SNAKE_CASE code (e.g. DIRECTLY_STATED, LOGICAL_ENTAILMENT, MULTIPLE_PREMISES_SUPPORT, PARTIAL_SUPPORT, NO_MENTION, ASSOCIATION_NOT_IDENTITY, SOURCES_DISAGREE, OUTSIDE_EVIDENCE).
 
 Return exactly this JSON shape:
-{"claim_key": "{$claim->claimKey}", "support_level": "direct|strong|interpretive|none|conflict", "supported_atom_keys": ["E1.S1"], "reason_code": "..."}
+{"claim_key": "{$claim->claimKey}", "support_level": "direct|strong|interpretive|none|conflict", "supported_atom_keys": ["E1.S1"], "reason_code": "...", "answers_subquestion": true}
 PROMPT;
     }
 
@@ -206,8 +212,9 @@ PROMPT;
                 'support_level' => ['type' => 'string', 'enum' => ['direct', 'strong', 'interpretive', 'none', 'conflict']],
                 'supported_atom_keys' => ['type' => 'array', 'items' => ['type' => 'string']],
                 'reason_code' => ['type' => 'string'],
+                'answers_subquestion' => ['type' => 'boolean'],
             ],
-            'required' => ['claim_key', 'support_level', 'supported_atom_keys', 'reason_code'],
+            'required' => ['claim_key', 'support_level', 'supported_atom_keys', 'reason_code', 'answers_subquestion'],
         ];
     }
 }

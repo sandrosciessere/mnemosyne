@@ -7,7 +7,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import AppLayout from '@/layouts/app-layout';
 import { cn } from '@/lib/utils';
 import { type BreadcrumbItem } from '@/types';
-import { type AdminAnswerData, type AdminClaimAudit, type AdminEvidenceData } from '@/types/answers';
+import { type AdminAnswerData, type AdminClaimAudit, type AdminEvidenceData, type SubquestionStatus } from '@/types/answers';
 import { Head } from '@inertiajs/react';
 import { ChevronsUpDown } from 'lucide-react';
 
@@ -24,6 +24,35 @@ function Field({ label, value, mono = false }: { label: string; value: string | 
             <dt className="text-muted-foreground text-xs">{label}</dt>
             <dd className={cn('text-sm break-all', mono && 'font-mono text-xs')}>{value ?? '—'}</dd>
         </div>
+    );
+}
+
+function SubquestionStatusBadge({ status }: { status: SubquestionStatus }) {
+    if (status === 'unanswered') {
+        return (
+            <Badge variant="destructive" className="font-mono text-xs">
+                {status}
+            </Badge>
+        );
+    }
+    if (status === 'capability_limited') {
+        return (
+            <Badge className="border-transparent bg-amber-100 font-mono text-xs text-amber-900 hover:bg-inherit dark:bg-amber-900/40 dark:text-amber-200">
+                {status}
+            </Badge>
+        );
+    }
+    if (status === 'needs_clarification') {
+        return (
+            <Badge className="border-transparent bg-sky-100 font-mono text-xs text-sky-900 hover:bg-inherit dark:bg-sky-900/40 dark:text-sky-200">
+                {status}
+            </Badge>
+        );
+    }
+    return (
+        <Badge variant="outline" className="font-mono text-xs">
+            {status}
+        </Badge>
     );
 }
 
@@ -107,6 +136,9 @@ export default function AnswerShow({ answer, user, all_claims, all_evidence }: A
                                 <Field label="Classifier" value={diagnostics.classifier_version} mono />
                                 <Field label="Decomposer" value={diagnostics.decomposer_version} mono />
                                 <Field label="Claim gate" value={diagnostics.claim_gate_version} mono />
+                                <Field label="Task contract" value={diagnostics.task_contract_version} mono />
+                                <Field label="Claim relevance gate" value={diagnostics.claim_relevance_gate_version} mono />
+                                <Field label="Coverage evaluator" value={diagnostics.coverage_evaluator_version} mono />
                                 <Field label="Retrieval profile" value={diagnostics.retrieval_profile_version} mono />
                                 <Field label="Unitizer" value={diagnostics.unitizer_version} mono />
                                 <Field label="Retrieval generation" value={diagnostics.retrieval_generation} mono />
@@ -166,13 +198,23 @@ export default function AnswerShow({ answer, user, all_claims, all_evidence }: A
                                     {answer.subquestions.map((subquestion) => (
                                         <li key={subquestion.key} className="flex flex-wrap items-start gap-2 text-sm">
                                             <span className="text-muted-foreground font-mono text-xs">{subquestion.key}</span>
-                                            <Badge
-                                                variant={subquestion.status === 'unanswered' ? 'destructive' : 'outline'}
-                                                className="font-mono text-xs"
-                                            >
-                                                {subquestion.status}
-                                            </Badge>
+                                            <SubquestionStatusBadge status={subquestion.status} />
                                             <span className="min-w-0 flex-1 whitespace-pre-line">{subquestion.text}</span>
+                                            {(subquestion.diagnosis !== null ||
+                                                subquestion.contract?.task_type != null ||
+                                                subquestion.contract?.answer_shape != null) && (
+                                                <span className="text-muted-foreground w-full pl-4 font-mono text-xs">
+                                                    {subquestion.diagnosis !== null && <span>diagnosis: {subquestion.diagnosis}</span>}
+                                                    {subquestion.contract?.task_type != null && (
+                                                        <span>
+                                                            {subquestion.diagnosis !== null ? ' · ' : ''}task: {subquestion.contract.task_type}
+                                                        </span>
+                                                    )}
+                                                    {subquestion.contract?.answer_shape != null && (
+                                                        <span> · shape: {subquestion.contract.answer_shape}</span>
+                                                    )}
+                                                </span>
+                                            )}
                                         </li>
                                     ))}
                                 </ul>
@@ -192,7 +234,7 @@ export default function AnswerShow({ answer, user, all_claims, all_evidence }: A
                             <p className="text-muted-foreground text-sm">No claims recorded.</p>
                         ) : (
                             <div className="overflow-x-auto">
-                                <table className="w-full min-w-[96rem] text-sm">
+                                <table className="w-full min-w-[104rem] text-sm">
                                     <thead>
                                         <tr className="border-sidebar-border/70 dark:border-sidebar-border border-b text-left">
                                             <th scope="col" className="px-2 py-2 font-medium">
@@ -224,6 +266,9 @@ export default function AnswerShow({ answer, user, all_claims, all_evidence }: A
                                             </th>
                                             <th scope="col" className="px-2 py-2 font-medium">
                                                 Gate
+                                            </th>
+                                            <th scope="col" className="px-2 py-2 font-medium">
+                                                Relevance
                                             </th>
                                             <th scope="col" className="px-2 py-2 font-medium">
                                                 Support atoms
@@ -268,6 +313,14 @@ export default function AnswerShow({ answer, user, all_claims, all_evidence }: A
                                                             <Badge className="mt-1 border-transparent bg-amber-100 font-mono text-xs whitespace-nowrap text-amber-900 hover:bg-inherit dark:bg-amber-900/40 dark:text-amber-200">
                                                                 verifier_positive / gate_rejected
                                                             </Badge>
+                                                        )}
+                                                    </td>
+                                                    <td className="px-2 py-2 font-mono text-xs">
+                                                        <span className={cn(claim.relevance_result === 'rejected' && 'text-destructive font-medium')}>
+                                                            {claim.relevance_result ?? '—'}
+                                                        </span>
+                                                        {claim.relevance_reason_code !== null && (
+                                                            <p className="text-muted-foreground">{claim.relevance_reason_code}</p>
                                                         )}
                                                     </td>
                                                     <td className="max-w-xs px-2 py-2 font-mono text-xs break-all">

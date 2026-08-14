@@ -727,8 +727,12 @@ components:
           description: Real persisted pipeline state (poll this)
         outcome:
           type: [string, "null"]
-          enum: [answered, partially_answered, insufficient_evidence, null]
-          description: Terminal answer semantics (insufficient_evidence is a successful honest state)
+          enum: [answered, partially_answered, insufficient_evidence, needs_clarification, null]
+          description: |
+            Terminal answer semantics from MATERIAL TASK COVERAGE (never
+            from internal claim counts): insufficient_evidence and
+            needs_clarification are successful honest states. Rejected
+            extra claims never make a complete answer partial.
         question: { type: string }
         conversation_id: { type: [string, "null"] }
         intent:
@@ -750,7 +754,13 @@ components:
             properties:
               key: { type: string, description: "SQ1, SQ2, ..." }
               text: { type: string }
-              status: { type: string, enum: [pending, answered, unanswered] }
+              status: { type: string, enum: [pending, answered, unanswered, capability_limited, needs_clarification] }
+              diagnosis:
+                type: [string, "null"]
+                description: "Bounded why-not code for non-answered parts (e.g. CAPABILITY_UNSUPPORTED, NO_RETRIEVAL_HITS, VERIFIER_REJECTED, RELEVANCE_GATE_REJECTED)"
+              contract:
+                type: [object, "null"]
+                description: TaskContract (task type, answer shape, coverage requirement, M3 support)
         claims:
           type: array
           items: { $ref: "#/components/schemas/AnswerClaim" }

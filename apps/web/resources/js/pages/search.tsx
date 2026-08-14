@@ -303,25 +303,46 @@ function ClaimsList({ answer }: { answer: AnswerData }) {
     );
 }
 
-/** Amber block listing subquestions without sufficient evidence (partial answers). */
+/** Blocks listing subquestion parts that could not be answered, split by reason. */
 function UnansweredSubquestions({ answer }: { answer: AnswerData }) {
-    const unanswered = (answer.subquestions ?? []).filter((subquestion) => subquestion.status === 'unanswered');
-    if (unanswered.length === 0) {
+    const subquestions = answer.subquestions ?? [];
+    const unanswered = subquestions.filter((subquestion) => subquestion.status === 'unanswered');
+    const capabilityLimited = subquestions.filter((subquestion) => subquestion.status === 'capability_limited');
+    if (unanswered.length === 0 && capabilityLimited.length === 0) {
         return null;
     }
     return (
-        <div className="rounded-md border border-amber-300 p-3 dark:border-amber-800">
-            <p className="text-sm font-medium">Evidenza insufficiente</p>
-            <p className="text-muted-foreground mt-1 text-sm">
-                Le seguenti parti della domanda non hanno evidenza sufficiente nei passaggi disponibili:
-            </p>
-            <ul className="mt-2 list-disc space-y-1 pl-5">
-                {unanswered.map((subquestion) => (
-                    <li key={subquestion.key} className="text-sm whitespace-pre-line">
-                        {subquestion.text}
-                    </li>
-                ))}
-            </ul>
+        <div className="space-y-3">
+            {unanswered.length > 0 && (
+                <div className="rounded-md border border-amber-300 p-3 dark:border-amber-800">
+                    <p className="text-sm font-medium">Evidenza insufficiente per questa parte</p>
+                    <p className="text-muted-foreground mt-1 text-sm">
+                        Le seguenti parti della domanda non hanno evidenza sufficiente nei passaggi disponibili:
+                    </p>
+                    <ul className="mt-2 list-disc space-y-1 pl-5">
+                        {unanswered.map((subquestion) => (
+                            <li key={subquestion.key} className="text-sm whitespace-pre-line">
+                                {subquestion.text}
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
+            {capabilityLimited.length > 0 && (
+                <div className="rounded-md border border-amber-300 p-3 dark:border-amber-800">
+                    <p className="text-sm font-medium text-amber-900 dark:text-amber-200">Oltre le capacità attuali</p>
+                    <p className="text-muted-foreground mt-1 text-sm">
+                        Questa parte richiede capacità di analisi globale/longitudinale che arriveranno in una versione futura:
+                    </p>
+                    <ul className="mt-2 list-disc space-y-1 pl-5">
+                        {capabilityLimited.map((subquestion) => (
+                            <li key={subquestion.key} className="text-sm whitespace-pre-line">
+                                {subquestion.text}
+                            </li>
+                        ))}
+                    </ul>
+                </div>
+            )}
         </div>
     );
 }
@@ -369,23 +390,26 @@ function SourceItem({ answerId, citation }: { answerId: string; citation: Citati
 // Answer card — the core citation-first UI.
 // ---------------------------------------------------------------------------
 
-function AnswerCard({ answer }: { answer: AnswerData }) {
+function AnswerCard({ answer, onRetry, retryDisabled }: { answer: AnswerData; onRetry: (answer: AnswerData) => void; retryDisabled: boolean }) {
     if (answer.status === 'failed') {
         return (
             <div className="space-y-2">
                 <Alert variant="destructive">
                     <AlertTriangle aria-hidden="true" className="size-4" />
-                    <AlertTitle>
-                        La risposta non è stata completata{answer.error_code ? <span className="font-mono"> ({answer.error_code})</span> : null}
-                    </AlertTitle>
-                    <AlertDescription>Si è verificato un errore durante l'elaborazione. Riprova più tardi.</AlertDescription>
+                    <AlertTitle>La generazione della risposta non è riuscita.</AlertTitle>
+                    <AlertDescription>Nessuna risposta non verificata è stata mostrata.</AlertDescription>
                 </Alert>
+                {answer.error_code !== null && <p className="text-muted-foreground font-mono text-xs">{answer.error_code}</p>}
+                <Button variant="outline" size="sm" onClick={() => onRetry(answer)} disabled={retryDisabled}>
+                    Riprova
+                </Button>
                 {answer.duration_ms !== null && <p className="text-muted-foreground text-xs">Completata in {formatDuration(answer.duration_ms)}</p>}
             </div>
         );
     }
 
-    const insufficient = answer.status === 'insufficient' || answer.outcome === 'insufficient_evidence';
+    const needsClarification = answer.outcome === 'needs_clarification';
+    const insufficient = !needsClarification && (answer.status === 'insufficient' || answer.outcome === 'insufficient_evidence');
 
     return (
         <Card>
@@ -408,7 +432,14 @@ function AnswerCard({ answer }: { answer: AnswerData }) {
                     </p>
                 )}
 
-                {insufficient ? (
+                {needsClarification ? (
+                    <div className="rounded-md border border-sky-300 bg-sky-50 p-3 dark:border-sky-800 dark:bg-sky-950/30">
+                        <p className="text-sm font-medium text-sky-900 dark:text-sky-200">Domanda da chiarire</p>
+                        <p className="mt-1 text-sm text-sky-900/90 dark:text-sky-200/90">
+                            Non è chiaro a quale elemento ti riferisci. Riformula la domanda indicando esplicitamente l'oggetto o il personaggio.
+                        </p>
+                    </div>
+                ) : insufficient ? (
                     <div className="flex items-start gap-3">
                         <SearchX className="text-muted-foreground mt-0.5 size-5 shrink-0" aria-hidden="true" />
                         <div>
@@ -424,15 +455,7 @@ function AnswerCard({ answer }: { answer: AnswerData }) {
                             <Alert>
                                 <Info aria-hidden="true" className="size-4" />
                                 <AlertTitle>Risposta parziale</AlertTitle>
-                                <AlertDescription>
-                                    Alcune parti della domanda non hanno evidenza sufficiente.
-                                    {answer.rejected_claim_count > 0 &&
-                                        ` ${answer.rejected_claim_count} ${
-                                            answer.rejected_claim_count === 1
-                                                ? 'affermazione scartata dalla verifica indipendente'
-                                                : 'affermazioni scartate dalla verifica indipendente'
-                                        }.`}
-                                </AlertDescription>
+                                <AlertDescription>Alcune parti della domanda non hanno evidenza sufficiente.</AlertDescription>
                             </Alert>
                         )}
 
@@ -443,6 +466,14 @@ function AnswerCard({ answer }: { answer: AnswerData }) {
                         )}
 
                         <UnansweredSubquestions answer={answer} />
+
+                        {answer.rejected_claim_count > 0 && (
+                            <p className="text-muted-foreground text-xs">
+                                {answer.rejected_claim_count === 1
+                                    ? '1 affermazione scartata dalla verifica'
+                                    : `${answer.rejected_claim_count} affermazioni scartate dalla verifica`}
+                            </p>
+                        )}
                     </>
                 )}
 
@@ -545,18 +576,14 @@ export default function Search({ books, answers_enabled, conversations }: Search
         setSelectedBooks((current) => (checked ? [...current, publicId] : current.filter((id) => id !== publicId)));
     };
 
-    const submit = async (event: FormEvent) => {
-        event.preventDefault();
-        if (busy || trimmed.length < QUESTION_MIN || trimmed.length > QUESTION_MAX) {
-            return;
-        }
-
+    /** Submit a question as a NEW answer request; used by the form and by "Riprova". */
+    const submitQuestion = async (text: string, scopeBookIds: string[]): Promise<boolean> => {
         setSubmitting(true);
         setError(null);
 
-        const payload: Record<string, unknown> = { question: trimmed };
-        if (selectedBooks.length > 0) {
-            payload.scope = { book_asset_ids: selectedBooks };
+        const payload: Record<string, unknown> = { question: text };
+        if (scopeBookIds.length > 0) {
+            payload.scope = { book_asset_ids: scopeBookIds };
         }
         if (conversationId !== null) {
             payload.conversation_id = conversationId;
@@ -576,22 +603,44 @@ export default function Search({ books, answers_enabled, conversations }: Search
                 } else {
                     setError(apiError);
                 }
-                return;
+                return false;
             }
             const body = (await response.json()) as { data: { id: string; status: AnswerStatus; conversation_id: string | null } };
             setEntries((current) => [
                 ...current,
-                { kind: 'question', key: `q-${body.data.id}`, text: trimmed },
+                { kind: 'question', key: `q-${body.data.id}`, text },
                 { kind: 'answer', key: `a-${body.data.id}`, answerId: body.data.id, status: body.data.status, answer: null },
             ]);
             setConversationId(body.data.conversation_id);
             setActiveAnswerId(body.data.id);
-            setQuestion('');
+            return true;
         } catch {
             setError(NETWORK_ERROR);
+            return false;
         } finally {
             setSubmitting(false);
         }
+    };
+
+    const submit = async (event: FormEvent) => {
+        event.preventDefault();
+        if (busy || trimmed.length < QUESTION_MIN || trimmed.length > QUESTION_MAX) {
+            return;
+        }
+        if (await submitQuestion(trimmed, selectedBooks)) {
+            setQuestion('');
+        }
+    };
+
+    /** Re-submit a failed run's question and scope as a NEW answer request. */
+    const retry = (failed: AnswerData) => {
+        if (busy) {
+            return;
+        }
+        void submitQuestion(
+            failed.question,
+            failed.scope.map((asset) => asset.book_asset_id),
+        );
     };
 
     const loadConversation = async (id: string) => {
@@ -675,7 +724,7 @@ export default function Search({ books, answers_enabled, conversations }: Search
                                 ) : (
                                     <li key={entry.key}>
                                         {entry.answer !== null && isTerminal(entry.status) ? (
-                                            <AnswerCard answer={entry.answer} />
+                                            <AnswerCard answer={entry.answer} onRetry={retry} retryDisabled={busy} />
                                         ) : (
                                             <Card>
                                                 <CardContent className="pt-6">

@@ -16,7 +16,7 @@ interface VerifierProvider
      * "your selected atoms do not state the claim — pick the asserting
      * sentence or answer none"); null on the first call.
      */
-    public function verify(string $question, EvidencePacket $packet, GeneratedClaimDraft $claim, ?string $feedback = null): VerificationResult;
+    public function verify(string $question, EvidencePacket $packet, GeneratedClaimDraft $claim, ?string $feedback = null, ?string $subquestionText = null): VerificationResult;
 
     public function identity(): ProviderIdentity;
 }

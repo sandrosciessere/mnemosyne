@@ -2,7 +2,7 @@
 export type AnswerStatus = 'queued' | 'retrieving' | 'expanding_retrieval' | 'generating' | 'verifying' | 'ready' | 'insufficient' | 'failed';
 
 /** Terminal answer semantics — insufficient evidence is a success state, not an error. */
-export type AnswerOutcome = 'answered' | 'partially_answered' | 'insufficient_evidence';
+export type AnswerOutcome = 'answered' | 'partially_answered' | 'insufficient_evidence' | 'needs_clarification';
 
 /** Epistemic label of a verified claim — the confidence representation (no scores). */
 export type ClaimLabel = 'textual_fact' | 'strong_inference' | 'interpretation' | 'conflict';
@@ -24,11 +24,27 @@ export interface CitationSpan {
     canonical_end: number;
 }
 
+/** Per-subquestion status of a decomposed compound question. */
+export type SubquestionStatus = 'pending' | 'answered' | 'unanswered' | 'capability_limited' | 'needs_clarification';
+
+/** Task contract resolved for a subquestion (what the pipeline committed to answer). */
+export interface SubquestionContract {
+    task_type: string | null;
+    answer_shape: string | null;
+    coverage: string | null;
+    supported_in_m3: boolean | null;
+    capability_notice: string | null;
+}
+
 /** One subquestion of a decomposed compound question. Text is UNTRUSTED model output. */
 export interface SubquestionData {
     key: string;
     text: string;
-    status: 'pending' | 'answered' | 'unanswered';
+    status: SubquestionStatus;
+    /** Machine diagnosis code explaining a non-answered status, when available. */
+    diagnosis: string | null;
+    /** Resolved task contract, when available. */
+    contract: SubquestionContract | null;
 }
 
 /** One numbered citation resolving to a durable evidence snapshot. Excerpt is UNTRUSTED book text. */
@@ -110,6 +126,9 @@ export interface AnswerDiagnostics {
     unitizer_version: string | null;
     decomposer_version: string | null;
     claim_gate_version: string | null;
+    task_contract_version?: string | null;
+    claim_relevance_gate_version?: string | null;
+    coverage_evaluator_version?: string | null;
     generator: {
         provider: string | null;
         model: string | null;
@@ -149,6 +168,8 @@ export interface AdminClaimAudit {
     subquestion_key: string | null;
     gate_result: 'passed' | 'rejected' | null;
     gate_reason_code: string | null;
+    relevance_result: 'passed' | 'rejected' | null;
+    relevance_reason_code: string | null;
     support_atoms: string[];
 }
 

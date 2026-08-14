@@ -147,17 +147,20 @@ class DecompositionAndPartialAnswerTest extends TestCase
         $this->assertSame(AnswerRunStatus::Ready, $run->status);
         $this->assertSame(AnswerOutcome::PartiallyAnswered, $run->outcome);
 
-        // Decomposition persisted with per-subquestion coverage.
+        // Decomposition persisted with per-subquestion coverage. SQ2 is
+        // an identity/reveal task: the TaskContract capability gate
+        // declares it BEFORE generation (capability_limited), and the
+        // single bounded expansion is NEVER wasted on an unsupported
+        // task.
         $this->assertSame('question-decomposer 1.0.0', $run->question_decomposer_version);
+        $this->assertSame('task-contract 1.0.0', $run->task_contract_version);
         $subquestions = collect($run->subquestions);
         $this->assertCount(2, $subquestions);
         $this->assertSame('answered', $subquestions->firstWhere('key', 'SQ1')['status']);
-        $this->assertSame('unanswered', $subquestions->firstWhere('key', 'SQ2')['status']);
-
-        // The single bounded expansion was FOCUSED on the deficient
-        // subquestion, and audited.
-        $this->assertSame(1, $run->retrieval_expansion_count);
-        $this->assertSame('SQ2', $run->retrieval_diagnostics['expansion_target']);
+        $this->assertSame('capability_limited', $subquestions->firstWhere('key', 'SQ2')['status']);
+        $this->assertSame('CAPABILITY_UNSUPPORTED', $subquestions->firstWhere('key', 'SQ2')['diagnosis']);
+        $this->assertSame(0, $run->retrieval_expansion_count);
+        $this->assertNotNull($run->capability_notice);
 
         // No fabricated identity claim exists anywhere.
         $this->assertCount(1, $run->claims);
@@ -169,8 +172,8 @@ class DecompositionAndPartialAnswerTest extends TestCase
         $this->assertSame('partially_answered', $presented['outcome']);
         $this->assertSame('it', $presented['response_language']);
         $this->assertIsInt($presented['duration_ms']);
-        $unanswered = array_filter($presented['subquestions'], fn ($sq) => $sq['status'] === 'unanswered');
-        $this->assertCount(1, $unanswered);
+        $notAnswered = array_filter($presented['subquestions'], fn ($sq) => $sq['status'] !== 'answered');
+        $this->assertCount(1, $notAnswered);
     }
 
     public function test_generator_receives_language_and_subquestions(): void

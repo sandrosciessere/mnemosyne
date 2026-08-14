@@ -44,14 +44,15 @@ class CrossLanguageAndContextTest extends TestCase
         app(RetrievalIndexer::class)->indexAsset($generation, $built['asset']);
         $this->grant($built['asset'], $user);
 
-        // Italian question whose literal matches the English source
-        // (exact component carries the sqlite path; PG integration
-        // covers dense cross-language recall with the real model).
-        $run = $this->makeRun($user, 'Chi ricostruì il "the windmill" e quante volte?', [$built['asset']->id]);
+        // Italian quote-location question whose literal matches the
+        // English source (exact component carries the sqlite path; PG
+        // integration covers dense cross-language recall).
+        $run = $this->makeRun($user, 'Dove appare "The windmill was rebuilt" nel testo?', [$built['asset']->id]);
 
-        // Fake generator answers IN ITALIAN citing the ENGLISH unit.
+        // Fake generator answers IN ITALIAN, with a location-shaped
+        // claim, citing the ENGLISH unit.
         $generator->scriptOutput($this->generatorAnswer([
-            $this->claim('CL1', 'Il mulino a vento fu ricostruito tre volte.', ['E2']),
+            $this->claim('CL1', 'La frase compare all\'inizio del capitolo, quando il mulino viene ricostruito.', ['E2']),
         ]));
         $verifier->scriptFor('CL1', $this->verdict('CL1', 'direct', ['E2']));
 
@@ -63,6 +64,7 @@ class CrossLanguageAndContextTest extends TestCase
         $presented = app(AnswerPresenter::class)->present($run);
         // Claim in the question's language…
         $this->assertStringContainsString('mulino', $presented['claims'][0]['text']);
+        $this->assertSame('it', $presented['response_language']);
         // …citation excerpt remains the EXACT original-language source,
         // never a translation.
         $citation = $presented['citations'][0];

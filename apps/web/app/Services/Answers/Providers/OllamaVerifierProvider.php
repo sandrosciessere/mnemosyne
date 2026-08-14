@@ -22,9 +22,9 @@ class OllamaVerifierProvider implements VerifierProvider
         private readonly array $config,
     ) {}
 
-    public function verify(string $question, EvidencePacket $packet, GeneratedClaimDraft $claim, ?string $feedback = null): VerificationResult
+    public function verify(string $question, EvidencePacket $packet, GeneratedClaimDraft $claim, ?string $feedback = null, ?string $subquestionText = null): VerificationResult
     {
-        $instruction = $this->prompts->verifierInstruction($question, $claim);
+        $instruction = $this->prompts->verifierInstruction($question, $claim, $subquestionText);
 
         if ($feedback !== null) {
             $instruction .= "\n\nAPPLICATION CHECK FAILED on your previous verdict: ".$feedback;

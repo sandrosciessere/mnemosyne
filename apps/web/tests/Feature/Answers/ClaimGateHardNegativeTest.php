@@ -250,7 +250,7 @@ class ClaimGateHardNegativeTest extends TestCase
         $run->refresh();
 
         $this->assertSame(AnswerRunStatus::Failed, $run->status);
-        $this->assertSame('VERIFIER_INVALID_OUTPUT', $run->error_code);
+        $this->assertSame('VERIFIER_PROTOCOL_ERROR', $run->error_code);
         $this->assertCount(0, $run->claims);
     }
 

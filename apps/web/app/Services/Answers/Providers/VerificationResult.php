@@ -21,5 +21,8 @@ class VerificationResult
         public readonly array $supportedAtomKeys,
         public readonly array $supportedEvidenceKeys,
         public readonly ?string $reasonCode,
+        /** Advisory: whether the claim answers its subquestion. Only a
+         *  `false` is acted on (rejection); `true` is never trusted alone. */
+        public readonly ?bool $answersSubquestion = null,
     ) {}
 }
