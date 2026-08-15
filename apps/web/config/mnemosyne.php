@@ -238,11 +238,17 @@ return [
             // Sufficiency heuristic: below this many units the pipeline
             // performs its single bounded retrieval expansion.
             'min_sufficient_units' => (int) env('MNEMOSYNE_ANSWER_MIN_UNITS', 3),
+            // Source-region diversity (two-stage packet selection): stage 1
+            // admits at most this many units per retrieved chunk / per
+            // source region (book+spine document) before stage 2 fills the
+            // remaining budget with held-back units in relevance order.
+            'max_initial_units_per_chunk' => (int) env('MNEMOSYNE_ANSWER_MAX_UNITS_PER_CHUNK', 3),
+            'max_initial_units_per_region' => (int) env('MNEMOSYNE_ANSWER_MAX_UNITS_PER_REGION', 6),
         ],
 
         'retrieval' => [
             // Bounded deterministic query variants per subquestion.
-            'max_query_variants' => (int) env('MNEMOSYNE_ANSWER_QUERY_VARIANTS', 4),
+            'max_query_variants' => (int) env('MNEMOSYNE_ANSWER_QUERY_VARIANTS', 5),
             // Local-episode neighborhood: ± chunks fetched around sibling
             // anchors for subquestions with no hits of their own.
             'neighborhood_window' => (int) env('MNEMOSYNE_ANSWER_NEIGHBORHOOD_WINDOW', 2),

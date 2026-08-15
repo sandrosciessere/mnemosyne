@@ -54,6 +54,8 @@ class GroundedAnswerOrchestrator
         private readonly ResponseLanguageDetector $language,
         private readonly RetrievalPolicyResolver $policies,
         private readonly EvidencePacketBuilder $packets,
+        private readonly EvidenceSufficiencyProbe $probe,
+        private readonly QueryReformulator $reformulator,
         private readonly ClaimEvidenceGate $gate,
         private readonly ClaimRelevanceGate $relevance,
         private readonly TaskCoverageEvaluator $coverage,
@@ -174,20 +176,59 @@ class GroundedAnswerOrchestrator
         $timings['retrieval_and_packet'] = $this->ms($t);
         $timings['retrieval'] = $this->searchMs($packet);
 
-        // ── ONE focused expansion on the neediest SUPPORTED task ─────
-        $minUnits = (int) $config['evidence']['min_sufficient_units'];
-        $expansionTarget = $this->expansionTarget($packet, $supported, ! $useComparative, $minUnits);
+        // ── ONE focused expansion, sufficiency-driven (pre-generation) ─
+        // Packet fullness is NOT recall: the task-aware probe checks,
+        // per supported subquestion, whether any packet unit plausibly
+        // carries the asked information. The first materially uncovered
+        // subquestion becomes the expansion target and gets dedicated
+        // expansion queries (relation perspectives, state expressions,
+        // hints from promising regions) — never just a larger top-K.
+        $expansionTarget = null;
+        $expansionQueries = [];
+        $probeResults = [];
+
+        if ($useComparative) {
+            $expansionTarget = $packet->unitCount() < (int) $config['evidence']['min_sufficient_units'] ? 'ALL' : null;
+        } else {
+            foreach ($supported as $subquestion) {
+                $probeResult = $this->probe->probe($contracts[$subquestion['key']], $packet);
+                $probeResults[$subquestion['key']] = $probeResult;
+
+                if ($expansionTarget === null && ! $probeResult['likely_sufficient']) {
+                    $expansionTarget = $subquestion['key'];
+                }
+            }
+        }
+
+        $expansionUsed = false;
 
         if ($expansionTarget !== null) {
             $run->forceFill(['status' => AnswerRunStatus::ExpandingRetrieval])->save();
 
             $t = hrtime(true);
-            $expandedPacket = $useComparative
-                ? $this->packets->build($generation, $assetIds, $run->question, $policy, expanded: true)
-                : $this->packets->buildForSubquestions($generation, $assetIds, $supported, $policy, $contracts, [$expansionTarget]);
-            $timings['retrieval_expansion'] = $this->ms($t);
 
-            if ($expandedPacket->unitCount() > $packet->unitCount()) {
+            if ($useComparative) {
+                $expandedPacket = $this->packets->build($generation, $assetIds, $run->question, $policy, expanded: true);
+            } else {
+                $hints = $this->probe->regionHints($contracts[$expansionTarget], $packet);
+                $expansionQueries[$expansionTarget] = $this->reformulator->expansionVariants($contracts[$expansionTarget], $hints);
+                $expandedPacket = $this->packets->buildForSubquestions(
+                    $generation, $assetIds, $supported, $policy, $contracts, [$expansionTarget], $expansionQueries,
+                );
+            }
+
+            $timings['retrieval_expansion'] = $this->ms($t);
+            $expansionUsed = true;
+
+            // Adopt the expanded packet whenever it brings NEW candidate
+            // evidence for the target (probe improved) or simply more
+            // distinct regions — not only when the unit count grew.
+            $improved = $useComparative
+                ? $expandedPacket->unitCount() > $packet->unitCount()
+                : ($this->probe->probe($contracts[$expansionTarget], $expandedPacket)['likely_sufficient']
+                    || ($expandedPacket->stats['distinct_regions'] ?? 0) > ($packet->stats['distinct_regions'] ?? 0));
+
+            if ($improved) {
                 $packet = $expandedPacket;
             }
 
@@ -198,7 +239,15 @@ class GroundedAnswerOrchestrator
         $this->persistEvidence($run, $packet);
         $run->forceFill([
             'evidence_stats' => $packet->stats,
-            'retrieval_diagnostics' => $packet->diagnostics + ($expansionTarget !== null ? ['expansion_target' => $expansionTarget] : []),
+            'retrieval_diagnostics' => array_merge($packet->diagnostics, [
+                'sufficiency_probe' => $probeResults,
+                'expansion_target' => $expansionTarget,
+                'expansion_trigger' => $expansionTarget !== null
+                    ? ($probeResults[$expansionTarget]['reason'] ?? 'THIN_PACKET')
+                    : null,
+                'expansion_queries' => $expansionQueries,
+                'expansion_used' => $expansionUsed,
+            ]),
         ])->save();
         $timings['evidence_persistence'] = $this->ms($t);
 
@@ -339,6 +388,122 @@ class GroundedAnswerOrchestrator
 
         $evaluation = $this->coverage->evaluate($subquestions, $contracts, $perSubquestion);
 
+        // ── Post-verification safety net for the single expansion ────
+        // The pre-generation probe can be fooled by units that mention
+        // the entity and the relation word without stating the fact.
+        // If the strict verifier then rejects for lack of evidence
+        // (NO_MENTION / missing support) on a supported subquestion and
+        // the ONE expansion is still unspent, spend it now with the
+        // dedicated expansion queries and re-run generation +
+        // verification ONCE. Still bounded: at most one expansion and
+        // one regeneration per answer run — no loop.
+        $lateTarget = $this->lateExpansionTarget($evaluation['subquestions'], $contracts, $claimResults, $expansionUsed, $useComparative);
+
+        if ($lateTarget !== null) {
+            Log::info('answers.late_focused_expansion', ['run' => $run->public_id, 'subquestion' => $lateTarget]);
+            $run->forceFill(['status' => AnswerRunStatus::ExpandingRetrieval])->save();
+
+            $t = hrtime(true);
+            $hints = $this->probe->regionHints($contracts[$lateTarget], $packet);
+            $expansionQueries[$lateTarget] = $this->reformulator->expansionVariants($contracts[$lateTarget], $hints);
+            $expandedPacket = $this->packets->buildForSubquestions(
+                $generation, $assetIds, $supported, $policy, $contracts, [$lateTarget], $expansionQueries,
+            );
+            $timings['retrieval_expansion'] = ($timings['retrieval_expansion'] ?? 0) + $this->ms($t);
+            $expansionUsed = true;
+
+            $newKeys = array_diff(
+                array_map(fn ($u) => $u->identity(), array_values($expandedPacket->units)),
+                array_map(fn ($u) => $u->identity(), array_values($packet->units)),
+            );
+
+            $run->forceFill([
+                'retrieval_expansion_count' => 1,
+                'retrieval_diagnostics' => ($run->retrieval_diagnostics ?? []) + [
+                    'late_expansion' => [
+                        'target' => $lateTarget,
+                        'trigger' => 'POST_VERIFICATION_NO_SUPPORT',
+                        'queries' => $expansionQueries[$lateTarget],
+                        'new_units' => count($newKeys),
+                    ],
+                ],
+            ])->save();
+
+            if ($newKeys !== []) {
+                // Replace packet + claims and redo generation/verification once.
+                $packet = $expandedPacket;
+                GroundedAnswerClaim::query()->where('grounded_answer_run_id', $run->id)->delete();
+                $this->persistEvidence($run, $packet);
+                $run->forceFill(['evidence_stats' => $packet->stats, 'status' => AnswerRunStatus::Generating])->save();
+
+                $request = new GenerationRequest(
+                    question: $run->question,
+                    packet: $packet,
+                    conversationContext: $this->conversationContext($run),
+                    languageName: $this->language->promptName($languageCode),
+                    subquestions: count($supported) > 1 ? $supported : [],
+                );
+
+                $t = hrtime(true);
+
+                try {
+                    $generated = $this->generateWithRepair($run, $request, $generator);
+                } finally {
+                    $timings['generation'] = ($timings['generation'] ?? 0) + $this->ms($t);
+                }
+
+                $generated = $this->enforceLanguage($run, $request, $generator, $generated, $languageCode, $timings);
+
+                if ($generated->status !== 'insufficient_evidence' && $generated->claims !== []) {
+                    $run->forceFill(['status' => AnswerRunStatus::Verifying])->save();
+                    $t = hrtime(true);
+                    $claimResults = [];
+                    $gateMs2 = 0.0;
+                    $protocolErrors = 0;
+
+                    try {
+                        foreach ($generated->claims as $claim) {
+                            $subquestionKey = $claim->subquestion ?? $defaultSubquestion;
+                            $contract = $contracts[$subquestionKey] ?? reset($contracts);
+                            [$verdict, $protocolError] = $this->verifyClaimRobustly($run, $packet, $claim, $verifier, $subquestionTexts[$subquestionKey] ?? null);
+
+                            if ($protocolError) {
+                                $protocolErrors++;
+                            }
+
+                            $g = hrtime(true);
+                            $gateResult = $this->gate->evaluate($claim, $verdict, $packet);
+                            $relevanceResult = ['result' => null, 'reason' => null];
+
+                            if ($gateResult['result'] === 'passed' && VerifierSupportLevel::from($verdict->supportLevel)->toEpistemicLabel() !== null) {
+                                $relevanceResult = $this->relevance->evaluate($claim, $verdict, $contract, $packet);
+                            }
+                            $gateMs2 += $this->ms($g);
+
+                            $claimResults[$claim->claimKey] = [
+                                'verdict' => $verdict, 'gate' => $gateResult, 'relevance' => $relevanceResult,
+                                'protocol_error' => $protocolError, 'subquestion' => $subquestionKey,
+                            ];
+                        }
+                    } finally {
+                        $timings['claim_gate'] = ($timings['claim_gate'] ?? 0) + round($gateMs2, 1);
+                        $timings['verification'] = ($timings['verification'] ?? 0) + round($this->ms($t) - $gateMs2, 1);
+                    }
+
+                    if ($protocolErrors > 0 && $protocolErrors === count($generated->claims)) {
+                        throw new AnswerProviderException('VERIFIER_PROTOCOL_ERROR', 'The verifier returned malformed output for every claim.');
+                    }
+
+                    $t = hrtime(true);
+                    $perSubquestion = $this->persistClaims($run, $packet, $generated, $claimResults, $supported);
+                    $timings['claim_persistence'] = ($timings['claim_persistence'] ?? 0) + $this->ms($t);
+                    $evaluation = $this->coverage->evaluate($subquestions, $contracts, $perSubquestion);
+                } else {
+                    $evaluation = $this->coverage->evaluate($subquestions, $contracts, $this->statsFromPacketOnly($supported, $packet));
+                }
+            }
+        }
+
         $this->appendAssistantMessage($run);
 
         $timings['total'] = $this->ms($pipelineStart);
@@ -472,20 +637,40 @@ class GroundedAnswerOrchestrator
     }
 
     /**
-     * The single bounded expansion targets the neediest SUPPORTED
-     * subquestion (never a capability-limited one).
+     * A supported subquestion still unanswered after verification for
+     * LACK OF EVIDENCE (not for capability, clarification, protocol or
+     * relevance-only reasons) is a valid late expansion target — once.
+     *
+     * @param  list<array>  $rows  coverage rows
+     * @param  array<string, TaskContract>  $contracts
      */
-    private function expansionTarget(EvidencePacket $packet, array $supported, bool $perSubquestion, int $minUnits): ?string
+    private function lateExpansionTarget(array $rows, array $contracts, array $claimResults, bool $expansionUsed, bool $comparative): ?string
     {
-        if (! $perSubquestion) {
-            return $packet->unitCount() < $minUnits ? 'ALL' : null;
+        if ($expansionUsed || $comparative) {
+            return null;
         }
 
-        $perSubquestionStats = $packet->stats['per_subquestion'] ?? [];
+        $evidenceLackDiagnoses = [
+            TaskCoverageEvaluator::DIAG_NO_HITS,
+            TaskCoverageEvaluator::DIAG_HITS_NOT_RELEVANT,
+            TaskCoverageEvaluator::DIAG_NO_CLAIM,
+            TaskCoverageEvaluator::DIAG_VERIFIER_REJECTED,
+            TaskCoverageEvaluator::DIAG_GATE_REJECTED,
+        ];
 
-        foreach ($supported as $subquestion) {
-            if (($perSubquestionStats[$subquestion['key']] ?? 0) < max(1, intdiv($minUnits, 2))) {
-                return $subquestion['key'];
+        foreach ($rows as $row) {
+            if (($row['status'] ?? null) !== 'unanswered') {
+                continue;
+            }
+
+            $contract = $contracts[$row['key']] ?? null;
+
+            if ($contract === null || ! $contract->supportedInM3) {
+                continue;
+            }
+
+            if (in_array($row['diagnosis'] ?? null, $evidenceLackDiagnoses, true)) {
+                return $row['key'];
             }
         }
 

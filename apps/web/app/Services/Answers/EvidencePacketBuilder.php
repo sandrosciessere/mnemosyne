@@ -112,6 +112,7 @@ class EvidencePacketBuilder
         RetrievalPolicy $policy,
         array $contracts = [],
         array $expandKeys = [],
+        array $expansionQueries = [],
     ): EvidencePacket {
         $config = config('mnemosyne.answers.evidence');
         $unitizer = new EvidenceUnitizer((int) $config['unit_max_chars']);
@@ -120,6 +121,7 @@ class EvidencePacketBuilder
             'policy' => $policy->toArray(),
             'expanded' => $expandKeys !== [],
             'expansion_targets' => $expandKeys,
+            'expansion_queries' => $expansionQueries,
             'searches' => [],
         ];
 
@@ -139,6 +141,16 @@ class EvidencePacketBuilder
                 ? $this->reformulator->variants($contract)
                 : [$subquestion['text']];
 
+            // Focused expansion: the target subquestion runs its
+            // dedicated expansion queries (relation perspectives, state
+            // expressions, region hints) IN ADDITION to the base
+            // variants — strictly more informative than a larger top-K.
+            if (in_array($key, $expandKeys, true) && isset($expansionQueries[$key])) {
+                foreach ($expansionQueries[$key] as $expansionQuery) {
+                    $variants[] = $expansionQuery;
+                }
+            }
+
             // Quote-location subquestions get an exact-first pass on the
             // extracted literal.
             if ($contract?->taskType === TaskContract::QUOTE_LOCATION) {
@@ -150,6 +162,14 @@ class EvidencePacketBuilder
                     $this->collectIntoStream($streams[$key], $exact['results'], $unitizer, $key, 'exact_first');
                 }
             }
+
+            // Cross-variant fusion: candidates from every variant are
+            // fused by RRF over their per-variant ranks BEFORE
+            // unitization, so a chunk found by several formulations
+            // rises, and one variant's top chunk cannot pre-empt the
+            // others by mere ordering. Each candidate remembers which
+            // variants found it (diagnostics).
+            $fusedByChunk = [];
 
             foreach ($variants as $index => $variant) {
                 $result = $this->search->search($generation, $assetIds, $variant, $policy->mode, $topK, $policy->rerank);
@@ -166,7 +186,27 @@ class EvidencePacketBuilder
                     $diagnostics['skipped_assets'] ?? [], $result['skipped_assets'],
                 )));
 
-                $this->collectIntoStream($streams[$key], $result['results'], $unitizer, $key, 'subquestion');
+                foreach ($result['results'] as $rank => $candidate) {
+                    $chunkId = $candidate['chunk']->id;
+                    $fusedByChunk[$chunkId] ??= ['chunk' => $candidate['chunk'], 'score' => 0.0, 'variants' => [], 'best_rank' => PHP_INT_MAX];
+                    $fusedByChunk[$chunkId]['score'] += 1.0 / (60 + $rank + 1);
+                    $fusedByChunk[$chunkId]['variants'][] = $index;
+                    $fusedByChunk[$chunkId]['best_rank'] = min($fusedByChunk[$chunkId]['best_rank'], $rank + 1);
+                }
+            }
+
+            uasort($fusedByChunk, fn ($a, $b) => $b['score'] <=> $a['score'] ?: $a['best_rank'] <=> $b['best_rank']);
+
+            foreach ($fusedByChunk as $entry) {
+                foreach ($unitizer->unitsForChunk($entry['chunk'], [
+                    'branch' => 'subquestion',
+                    'subquestion' => $key,
+                    'final_rank' => $entry['best_rank'],
+                    'variants' => array_values(array_unique($entry['variants'])),
+                    'fused_score' => round($entry['score'], 5),
+                ]) as $unit) {
+                    $streams[$key][] = $unit;
+                }
             }
         }
 
@@ -314,6 +354,26 @@ class EvidencePacketBuilder
      *
      * @param  array<string, list<EvidenceUnit>>  $streams
      */
+    /**
+     * Two-stage, diversity-aware packet selection.
+     *
+     * Stage 1 (BREADTH): walk the fused/interleaved candidate sequence
+     * admitting at most `max_initial_units_per_chunk` units from any one
+     * retrieved chunk and `max_initial_units_per_region` from any one
+     * source region (book + spine document). A single top-ranked chunk
+     * that splits into ten sentence units can no longer monopolize the
+     * packet before other plausible source regions are represented.
+     *
+     * Stage 2 (DEPTH): the units held back in stage 1 are admitted in
+     * their original relevance order until the budget is reached —
+     * promising regions regain their local context once breadth exists.
+     *
+     * Occupancy is NOT recall: `stats.regions` reports how many distinct
+     * source regions/chunks made it into the packet so diagnostics can
+     * distinguish "24 units from one scene" from "24 units from twelve".
+     *
+     * @param  array<string, list<EvidenceUnit>>  $streams
+     */
     private function assembleStreams(array $streams, array $config, array $diagnostics, bool $interleave): EvidencePacket
     {
         $sequence = [];
@@ -343,26 +403,30 @@ class EvidencePacketBuilder
         $chars = 0;
         $droppedDuplicates = 0;
         $droppedBudget = 0;
+        $heldForDepth = 0;
         $maxUnits = (int) $config['max_units'];
         $maxChars = (int) $config['max_chars'];
+        $maxPerChunk = max(1, (int) ($config['max_initial_units_per_chunk'] ?? 3));
+        $maxPerRegion = max($maxPerChunk, (int) ($config['max_initial_units_per_region'] ?? 6));
 
-        foreach ($sequence as $unit) {
+        $perChunk = [];
+        $perRegion = [];
+        $deferred = [];
+
+        $admit = function (EvidenceUnit $unit) use (&$selected, &$seen, &$chars, &$droppedDuplicates, &$droppedBudget, $maxUnits, $maxChars): bool {
             $identity = $unit->identity();
 
             if (isset($seen[$identity])) {
-                // Same canonical evidence reached via another chunk
-                // (deliberate M2 overlap): keep once, remember the extra
-                // retrieval route as diagnostics.
                 $selected[$seen[$identity]]->retrievalMeta['also_via'][] = $unit->retrievalMeta['chunk_public_id'] ?? null;
                 $droppedDuplicates++;
 
-                continue;
+                return false;
             }
 
             if (count($selected) >= $maxUnits || ($chars + $unit->charCount()) > $maxChars) {
                 $droppedBudget++;
 
-                continue;
+                return false;
             }
 
             $key = 'E'.(count($selected) + 1);
@@ -370,6 +434,40 @@ class EvidencePacketBuilder
             $seen[$identity] = $key;
             $selected[$key] = $unit;
             $chars += $unit->charCount();
+
+            return true;
+        };
+
+        // ── Stage 1: breadth across chunks / source regions ──────────
+        foreach ($sequence as $unit) {
+            $chunkKey = $unit->retrievalMeta['chunk_public_id'] ?? spl_object_id($unit);
+            $regionKey = $unit->bookAssetId.':'.$unit->spineIndex;
+
+            if (($perChunk[$chunkKey] ?? 0) >= $maxPerChunk || ($perRegion[$regionKey] ?? 0) >= $maxPerRegion) {
+                $deferred[] = $unit;
+                $heldForDepth++;
+
+                continue;
+            }
+
+            if ($admit($unit)) {
+                $perChunk[$chunkKey] = ($perChunk[$chunkKey] ?? 0) + 1;
+                $perRegion[$regionKey] = ($perRegion[$regionKey] ?? 0) + 1;
+                $unit->retrievalMeta['selection'] = 'breadth';
+            }
+        }
+
+        // ── Stage 2: depth — held-back units in relevance order ──────
+        foreach ($deferred as $unit) {
+            if (count($selected) >= $maxUnits) {
+                $droppedBudget++;
+
+                continue;
+            }
+
+            if ($admit($unit)) {
+                $unit->retrievalMeta['selection'] = 'depth';
+            }
         }
 
         $perAsset = [];
@@ -384,12 +482,33 @@ class EvidencePacketBuilder
             }
         }
 
+        $distinctChunks = [];
+        $distinctRegions = [];
+        $breadth = 0;
+
+        foreach ($selected as $unit) {
+            $distinctChunks[$unit->retrievalMeta['chunk_public_id'] ?? spl_object_id($unit)] = true;
+            $distinctRegions[$unit->bookAssetId.':'.$unit->spineIndex] = true;
+
+            if (($unit->retrievalMeta['selection'] ?? null) === 'breadth') {
+                $breadth++;
+            }
+        }
+
         $stats = [
             'units' => count($selected),
             'chars' => $chars,
             'per_asset' => $perAsset,
             'dropped_duplicates' => $droppedDuplicates,
             'dropped_budget' => $droppedBudget,
+            // Diversity (NOT recall): distinct retrieved chunks and
+            // source regions represented, breadth vs depth admissions,
+            // and units held back by the per-chunk/region caps in stage 1.
+            'distinct_chunks' => count($distinctChunks),
+            'distinct_regions' => count($distinctRegions),
+            'breadth_units' => $breadth,
+            'depth_units' => count($selected) - $breadth,
+            'held_for_depth' => $heldForDepth,
         ];
 
         if ($perSubquestion !== []) {
