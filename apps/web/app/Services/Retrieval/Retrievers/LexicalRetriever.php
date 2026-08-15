@@ -90,17 +90,33 @@ class LexicalRetriever
         return $chosen === [] ? null : implode(' OR ', $chosen);
     }
 
+    /** Allowlisted PostgreSQL text-search configuration for a generation. */
+    public static function tsConfigFor(RetrievalGeneration $generation): string
+    {
+        $config = (string) ($generation->config['lexical']['config'] ?? 'simple');
+
+        return in_array($config, ['simple', 'english', 'italian', 'french', 'german', 'spanish'], true)
+            ? $config
+            : 'simple';
+    }
+
     /** @return list<array{chunk: RetrievalChunk, rank: int, score: float}> */
     private function run(RetrievalGeneration $generation, array $assetIds, string $tsQueryInput, int $limit): array
     {
+        // Text-search config is OWNED by the generation profile (M2
+        // backlog F26): the query-side config must equal the config the
+        // tsvector was indexed with. Allowlisted identifiers only —
+        // never interpolate arbitrary strings into SQL.
+        $tsConfig = self::tsConfigFor($generation);
+
         // ts_rank_cd normalization 32: rank/(rank+1) → results in (0,1),
         // still NOT a calibrated probability (documented).
         $rows = DB::select(
-            'SELECT id, ts_rank_cd(tsv, websearch_to_tsquery(\'simple\', ?), 32) AS score
+            'SELECT id, ts_rank_cd(tsv, websearch_to_tsquery(\''.$tsConfig.'\', ?), 32) AS score
              FROM retrieval_chunks
              WHERE retrieval_generation_id = ?
                AND book_asset_id IN ('.implode(',', array_fill(0, count($assetIds), '?')).')
-               AND tsv @@ websearch_to_tsquery(\'simple\', ?)
+               AND tsv @@ websearch_to_tsquery(\''.$tsConfig.'\', ?)
              ORDER BY score DESC, book_asset_id ASC, ordinal ASC
              LIMIT ?',
             array_merge([$tsQueryInput, $generation->id], $assetIds, [$tsQueryInput, $limit]),

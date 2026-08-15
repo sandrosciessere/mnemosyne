@@ -49,7 +49,7 @@ class EvidencePacketBuilder
         if ($policy->exactFirst) {
             $phrase = $this->classifier->extractQuotedPhrase($question) ?? trim($question);
 
-            if (mb_strlen($phrase) <= (int) config('mnemosyne.retrieval.search.max_exact_phrase_chars')) {
+            if (mb_strlen($phrase) <= HybridSearchService::maxExactPhraseChars($generation)) {
                 $exact = $this->search->search($generation, $assetIds, $phrase, 'exact', $topK, false);
                 $diagnostics['searches'][] = ['mode' => 'exact', 'phrase_chars' => mb_strlen($phrase), 'results' => count($exact['results']), 'ms' => $exact['timings_ms']['total'] ?? null];
                 $this->collect($candidates, $exact['results'], 'exact_first');
@@ -156,7 +156,7 @@ class EvidencePacketBuilder
             if ($contract?->taskType === TaskContract::QUOTE_LOCATION) {
                 $phrase = $this->classifier->extractQuotedPhrase($subquestion['text']) ?? $subquestion['text'];
 
-                if (mb_strlen($phrase) <= (int) config('mnemosyne.retrieval.search.max_exact_phrase_chars')) {
+                if (mb_strlen($phrase) <= HybridSearchService::maxExactPhraseChars($generation)) {
                     $exact = $this->search->search($generation, $assetIds, $phrase, 'exact', $topK, false);
                     $diagnostics['searches'][] = ['mode' => 'exact', 'subquestion' => $key, 'query' => mb_substr($phrase, 0, 200), 'results' => count($exact['results']), 'ms' => $exact['timings_ms']['total'] ?? null];
                     $this->collectIntoStream($streams[$key], $exact['results'], $unitizer, $key, 'exact_first');

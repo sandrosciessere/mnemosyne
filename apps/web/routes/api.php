@@ -47,6 +47,7 @@ Route::prefix('v1')->name('api.v1.')->group(function () {
             ->middleware('throttle:retrieval')
             ->name('retrieval.search');
         Route::get('retrieval/chunks/{chunk}/neighbors', [RetrievalSearchController::class, 'neighbors'])
+            ->middleware('throttle:retrieval-neighbors')
             ->name('retrieval.neighbors');
 
         Route::middleware('admin')->prefix('admin')->name('admin.')->group(function () {

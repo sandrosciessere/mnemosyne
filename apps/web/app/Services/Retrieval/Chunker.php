@@ -88,9 +88,18 @@ class Chunker
             // Hard maximum on SOURCE CONTENT (overlap prefix excluded):
             // close the chunk before this piece would push content past max.
             $contentLen = $bufferLen - $bufferOverlapLen;
-            if ($buffer !== [] && $contentLen >= $min
-                && $contentLen + 1 + mb_strlen($piece['text']) > $max) {
-                $flush(true);
+            $pieceLen = mb_strlen($piece['text']);
+
+            if ($buffer !== [] && $contentLen + 1 + $pieceLen > $max) {
+                // Normally a chunk closes only once it has >= min content;
+                // BUT when the incoming piece alone is large (>= min), a
+                // sub-min buffer must still close (M2 backlog F13): keeping
+                // it would let content reach min + max, breaking the hard
+                // ceiling. The small buffer becomes a short-but-valid
+                // chunk; nothing exceeds max.
+                if ($contentLen >= $min || $pieceLen >= $min) {
+                    $flush(true);
+                }
             }
 
             // Start-of-chunk: prepend pending overlap pieces (same doc only).

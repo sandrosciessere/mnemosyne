@@ -75,10 +75,18 @@ p99 ≈ 2000, and e5's 512-token window):
   case semantics.
   **Boundary guarantee**: a literal straddling the chunk partition is
   intact in one chunk iff its pre-boundary portion fits the chunker
-  overlap; accepted exact phrases are therefore capped at
-  `overlap_tail_chars` (200). Longer exact-mode queries get 422
-  `EXACT_QUERY_TOO_LONG`; hybrid skips the exact component with
+  overlap; accepted exact phrases are therefore capped at the
+  GENERATION's snapshotted `overlap_tail_chars` (200 in the current
+  generation — derived via `HybridSearchService::maxExactPhraseChars`,
+  never from mutable live config alone). Longer exact-mode queries get
+  422 `EXACT_QUERY_TOO_LONG`; hybrid skips the exact component with
   `meta.exact_skipped_reason` — never a silent false-negative window.
+  Literals are NFC-normalized before matching (recall for NFD input;
+  source coordinates are never altered); `meta.exact_truncated` says
+  when more chunks matched than the candidate cap returned; sub-3-char
+  literals are served but flagged (low precision, no table scans added).
+  Result payloads state their coordinate systems explicitly
+  (`excerpt_start_in_chunk`, excerpt-relative offsets on exact matches).
 - **Lexical** (v1.1.0): generated weighted tsvector (`'simple'` config —
   language-agnostic, multilingual; heading=A, body=B) + GIN;
   `websearch_to_tsquery` (never string-built tsquery);
@@ -88,8 +96,11 @@ p99 ≈ 2000, and e5's 512-token window):
   strict AND semantics require), a fallback ORs the meaningful query
   tokens (\p{L}\p{N} only, ≥3 chars, deduped, capped at 12; still one
   bound parameter — no tsquery injection). The strategy used is exposed
-  as `lexical_strategy` in admin debug diagnostics. Generations
-  snapshotting lexical 1.0.0 keep strict-only behavior.
+  to EVERY caller as `meta.lexical_strategy` (`strict` / `or_fallback` /
+  `none`) + `meta.lexical_fallback_used`. The text-search configuration
+  is owned by the generation profile (`lexical.config`, allowlisted;
+  index and query side always agree). Generations snapshotting lexical
+  1.0.0 keep strict-only behavior.
 - **Dense**: multilingual-e5-small (384d, cosine, normalized) served by
   the local worker; query embeds with `query:` prefix, documents with
   `passage:`. SQL orders by `embedding::vector(384) <=> query` under the
@@ -109,7 +120,12 @@ p99 ≈ 2000, and e5's 512-token window):
   comparable; deterministic tie-break (asset, ordinal). RRF score is not
   a probability.
 - **Reranker**: mmarco-mMiniLMv2 cross-encoder on the top M=24 fused
-  candidates via the worker. **Opt-in** (`rerank` defaults to false):
+  candidates via the worker (hard safety cap 50 regardless of config).
+  Truthful reporting: `reranker_attempted` vs `reranker_used` — an
+  HTTP 200 with empty/malformed/non-finite scores does NOT count as
+  reranked (`reranker_fallback_reason` = `empty_scores`/`partial_scores`);
+  the worker's model identity (hf_id + revision) is recorded whenever
+  reranking is attempted. **Opt-in** (`rerank` defaults to false):
   it adds seconds of CPU latency for a mixed quality delta, so the
   default query path never pays it. Runs under its own dedicated
   timeout (`retrieval.reranker.timeout_seconds`, default 30 s — not the
@@ -131,10 +147,19 @@ p99 ≈ 2000, and e5's 512-token window):
 A generation snapshots chunker version+config(+hash), lexical & query-
 normalization versions, embedding identity (model_key, hf_id, pinned
 revision, dims, metric, normalization), fusion and reranker profiles.
-Building generations index side-by-side with the active one; activation
-is one transactional flip (previous → superseded, data preserved);
-queries execute against exactly one generation; per-generation partial
-ANN indexes make cross-generation vector mixing physically impossible.
+Building generations index side-by-side with the active one (newly
+ready books are enqueued into the active AND every building
+generation, so a build converges on the complete eligible set);
+activation is one transactional flip (previous → superseded, data
+preserved; a concurrent second activation loses with a controlled
+`GENERATION_ACTIVATION_CONFLICT`, never a 500); queries execute against
+exactly one generation; per-generation partial ANN indexes make
+cross-generation vector mixing physically impossible. Source-changed
+lifecycle: when an asset's canonical fingerprint changes (legitimate
+re-ingest), its retrieval state is re-keyed and rebuilt for the new
+source; historical grounded-answer citations keep their own fingerprint
+and go stale fail-closed. Storage: `pgvector/pgvector:pg17` is pinned by
+digest (PostgreSQL 17.10 + pgvector 0.8.6).
 
 ## API authentication
 

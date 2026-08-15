@@ -110,12 +110,17 @@ paths:
         Authentication: first-party browser sessions (Sanctum stateful
         SPA — session cookie + `X-XSRF-TOKEN`) or a Sanctum bearer token.
 
-        Exact mode accepts literals up to 200 characters: that is the
-        boundary guarantee (a phrase straddling a chunk partition is
-        findable only while its pre-boundary portion fits the chunker
-        overlap). Longer queries in exact mode return 422
+        Exact mode accepts literals up to the ACTIVE generation's
+        snapshotted chunker overlap (200 characters in the current
+        generation): that is the boundary guarantee (a phrase straddling
+        a chunk partition is findable only while its pre-boundary portion
+        fits the overlap). Longer queries in exact mode return 422
         `EXACT_QUERY_TOO_LONG`; in hybrid mode the exact component is
-        skipped and `meta.exact_skipped_reason` says so.
+        skipped and `meta.exact_skipped_reason` says so. Literals are
+        NFC-normalized before matching (source coordinates are never
+        altered); very short literals (<3 chars) are served but
+        precision is low. `meta.exact_truncated` reports when more chunks
+        matched than were returned.
       requestBody:
         required: true
         content:
@@ -157,9 +162,19 @@ paths:
                         type: array
                         description: authorized books NOT indexed in the active generation (never silently partial)
                         items: { type: string }
-                      reranker_used: { type: boolean }
-                      reranker_fallback_reason: { type: [string, "null"], enum: [worker_unavailable, reranker_error, null] }
+                      reranker_attempted: { type: boolean, description: whether reranking was requested AND a call was made }
+                      reranker_used: { type: boolean, description: "true ONLY when a usable score set actually reordered the head; an HTTP 200 with empty/malformed/non-finite scores is NOT 'used'" }
+                      reranker_fallback_reason:
+                        type: [string, "null"]
+                        enum: [timeout, worker_unavailable, reranker_error, empty_scores, partial_scores, null]
+                      lexical_strategy:
+                        type: [string, "null"]
+                        enum: [strict, or_fallback, none, null]
+                        description: "strict websearch query, OR-of-meaningful-tokens fallback (natural-language queries), or none (component not run)"
+                      lexical_fallback_used: { type: [boolean, "null"] }
+                      exact_truncated: { type: [boolean, "null"], description: exact component hit its candidate cap — more chunks matched than were returned }
                       dense_unavailable: { type: boolean, description: hybrid degraded — dense component was down }
+                      exact_skipped_reason: { type: [string, "null"], enum: [phrase_too_long, null] }
                       timings_ms: { type: object, description: per-stage wall times (admin debug only) }
         "403": { description: "error.code SCOPE_NOT_ACCESSIBLE — scope includes an inaccessible/unknown book" }
         "409": { description: "error.code NO_ACTIVE_GENERATION" }
@@ -597,6 +612,10 @@ components:
         spine_index: { type: integer }
         excerpt: { type: string, description: source text only (≤700 chars, overlap prefix removed) }
         excerpt_truncated: { type: boolean }
+        excerpt_start_in_chunk: { type: integer, description: chunk-local codepoint offset where the excerpt begins (= overlap_prefix_chars) }
+        coordinate_systems:
+          type: object
+          description: "Explicit coordinate contract: chunk_* = chunk-local codepoints into source_text; excerpt_* = excerpt-relative codepoints (chunk offset − excerpt_start_in_chunk); canonical_* = book canonical codepoints; utf16_* = book canonical UTF-16 code units"
         char_count: { type: integer }
         evidence_spans:
           type: array
@@ -608,9 +627,11 @@ components:
             type: object
             properties:
               text: { type: string, description: equals the requested literal }
-              chunk_start: { type: integer }
+              chunk_start: { type: integer, description: chunk-local codepoint offset }
               chunk_end: { type: integer }
-              canonical_start: { type: [integer, "null"] }
+              excerpt_start: { type: integer, description: excerpt-relative codepoint offset (may fall outside the shown excerpt window) }
+              excerpt_end: { type: integer }
+              canonical_start: { type: [integer, "null"], description: book canonical codepoint offset }
               canonical_end: { type: [integer, "null"] }
         scores:
           type: object

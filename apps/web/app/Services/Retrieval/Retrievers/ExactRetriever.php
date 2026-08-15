@@ -19,6 +19,12 @@ class ExactRetriever
 {
     private const MATCHES_PER_CHUNK = 3;
 
+    /** Whether the last search hit the result cap (more chunks matched). */
+    public bool $lastTruncated = false;
+
+    /** Whether the last phrase was shorter than 3 chars (precision caveat). */
+    public bool $lastQueryShort = false;
+
     /**
      * @param  list<int>  $assetIds
      * @return list<array{chunk: RetrievalChunk, rank: int, matches: list<array{chunk_start: int, chunk_end: int, canonical_start: int|null, canonical_end: int|null, text: string}>}>
@@ -34,6 +40,21 @@ class ExactRetriever
             return [];
         }
 
+        // Recall (M2 backlog F5/F6/F17): canonical M1 text is NFC. A user
+        // literal typed/pasted in NFD ("e" + U+0301) would silently miss
+        // its NFC source occurrence — normalize the PHRASE to NFC before
+        // matching. Source coordinates stay untouched (they are located
+        // in the original source string below).
+        if (class_exists(\Normalizer::class)) {
+            $phrase = \Normalizer::normalize($phrase, \Normalizer::FORM_C) ?: $phrase;
+        }
+
+        // Very short literals (M2 backlog F22): sub-3-char patterns are
+        // legal but scale badly (trigram index unusable, LIKE degenerates
+        // to a scan on large scopes). They are still served — bounded by
+        // $limit — and flagged so callers can explain low precision.
+        $this->lastQueryShort = mb_strlen($phrase) < 3;
+
         $pattern = '%'.self::escapeLike($phrase).'%';
         $operator = $caseSensitive ? 'like' : 'ilike';
 
@@ -44,15 +65,19 @@ class ExactRetriever
             $operator = 'like';
         }
 
+        // Fetch one extra row to detect truncation honestly (F17).
         $chunks = RetrievalChunk::query()
             ->where('retrieval_generation_id', $generation->id)
             ->whereIn('book_asset_id', $assetIds)
             ->where('source_text', $operator, $pattern)
             ->orderBy('book_asset_id')
             ->orderBy('ordinal')
-            ->limit($limit)
+            ->limit($limit + 1)
             ->with('spans')
             ->get();
+
+        $this->lastTruncated = $chunks->count() > $limit;
+        $chunks = $chunks->take($limit);
 
         $results = [];
         $rank = 1;

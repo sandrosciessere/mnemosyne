@@ -6,6 +6,7 @@ use App\Exceptions\Library\InvalidTransitionException;
 use App\Models\IngestionEvent;
 use App\Models\RetrievalGeneration;
 use App\Services\Ingestion\WorkerClient;
+use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Facades\DB;
 
 /**
@@ -43,7 +44,7 @@ class RetrievalGenerationManager
         $config = [
             'chunker' => ['version' => $retrieval['chunker']['version'], 'config' => $chunkerConfig],
             'query_normalization_version' => $retrieval['query_normalization_version'],
-            'lexical' => ['version' => $retrieval['lexical_version'], 'config' => 'simple'],
+            'lexical' => ['version' => $retrieval['lexical_version'], 'config' => $retrieval['lexical_config'] ?? 'simple'],
             'embedding' => [
                 'provider' => 'worker-local',
                 'model_key' => $modelKey,
@@ -142,10 +143,20 @@ class RetrievalGenerationManager
                 ->where('status', 'active')
                 ->update(['status' => 'superseded', 'updated_at' => now()]);
 
-            $generation->forceFill([
-                'status' => 'active',
-                'activated_at' => now(),
-            ])->save();
+            try {
+                $generation->forceFill([
+                    'status' => 'active',
+                    'activated_at' => now(),
+                ])->save();
+            } catch (UniqueConstraintViolationException $exception) {
+                // Concurrent activation (M2 backlog F8): the one-active
+                // partial unique index made the invariant hold; surface
+                // the loser as a controlled domain outcome, never a 500.
+                throw new InvalidTransitionException(
+                    'GENERATION_ACTIVATION_CONFLICT',
+                    'Another generation was activated concurrently; retry after it settles.',
+                );
+            }
 
             IngestionEvent::record('retrieval.generation_activated', payload: [
                 'generation' => $generation->public_id,

@@ -44,7 +44,15 @@ class RetrievalSearchController extends Controller
         // boundary guarantee (pre-boundary portion <= chunker overlap).
         // Never silently run an exact search with a known false-negative
         // window.
-        $maxExact = (int) config('mnemosyne.retrieval.search.max_exact_phrase_chars');
+        $generation = RetrievalGeneration::active();
+
+        if ($generation === null) {
+            return $this->errorResponse('NO_ACTIVE_GENERATION', 'No retrieval generation is active.', 409);
+        }
+
+        // Cap derived from the ACTIVE generation's snapshotted overlap
+        // (M2 backlog F3/F4), not from mutable live config alone.
+        $maxExact = HybridSearchService::maxExactPhraseChars($generation);
 
         if (($validated['mode'] ?? 'hybrid') === 'exact' && mb_strlen(trim($validated['query'])) > $maxExact) {
             return $this->errorResponse(
@@ -52,12 +60,6 @@ class RetrievalSearchController extends Controller
                 "Exact phrases are limited to {$maxExact} characters (boundary guarantee).",
                 422,
             );
-        }
-
-        $generation = RetrievalGeneration::active();
-
-        if ($generation === null) {
-            return $this->errorResponse('NO_ACTIVE_GENERATION', 'No retrieval generation is active.', 409);
         }
 
         $user = $request->user();
@@ -94,8 +96,17 @@ class RetrievalSearchController extends Controller
                 'generation' => $generation->public_id,
                 'mode' => $validated['mode'] ?? 'hybrid',
                 'skipped_assets' => $outcome['skipped_assets'],
+                'reranker_attempted' => $outcome['diagnostics']['reranker_attempted'] ?? false,
                 'reranker_used' => $outcome['diagnostics']['reranker_used'],
                 'reranker_fallback_reason' => $outcome['diagnostics']['reranker_fallback_reason'],
+                // Lexical strategy is product-relevant (natural-language
+                // queries fall back to OR-of-tokens): exposed for every
+                // caller, not only admin debug (M2 backlog F7).
+                'lexical_strategy' => $outcome['diagnostics']['lexical_strategy'] ?? null,
+                'lexical_fallback_used' => isset($outcome['diagnostics']['lexical_strategy'])
+                    ? $outcome['diagnostics']['lexical_strategy'] !== 'strict'
+                    : null,
+                'exact_truncated' => $outcome['diagnostics']['exact_truncated'] ?? null,
                 'dense_unavailable' => $outcome['diagnostics']['dense_unavailable'] ?? false,
                 'exact_skipped_reason' => $outcome['diagnostics']['exact_skipped_reason'] ?? null,
                 'timings_ms' => $debug ? $outcome['timings_ms'] : null,
@@ -197,6 +208,19 @@ class RetrievalSearchController extends Controller
             'spine_index' => $chunk->spine_index,
             'excerpt' => mb_substr($excerptSource, 0, 700),
             'excerpt_truncated' => mb_strlen($excerptSource) > 700,
+            // Coordinate systems made explicit (M2 backlog F16): the
+            // excerpt starts at this chunk-local codepoint offset (the
+            // overlap prefix is stripped from display but part of the
+            // chunk); chunk_* offsets below are chunk-local codepoints,
+            // canonical_* are book-canonical codepoints, utf16_* (in
+            // evidence_spans) are UTF-16 code units.
+            'excerpt_start_in_chunk' => $chunk->overlap_prefix_chars,
+            'coordinate_systems' => [
+                'chunk_start/chunk_end' => 'chunk-local codepoint offsets into source_text (before excerpt stripping)',
+                'excerpt_start/excerpt_end' => 'excerpt-relative codepoint offsets (= chunk offset - excerpt_start_in_chunk, may be negative/beyond when the match is outside the shown excerpt)',
+                'canonical_start/canonical_end' => 'book canonical codepoint offsets',
+                'utf16_start/utf16_end' => 'book canonical UTF-16 code units',
+            ],
             'char_count' => $chunk->char_count,
             'evidence_spans' => $chunk->spans->map(
                 fn ($span) => $span->toProvenanceArray(),
@@ -205,6 +229,8 @@ class RetrievalSearchController extends Controller
                 'text' => $match['text'],
                 'chunk_start' => $match['chunk_start'],
                 'chunk_end' => $match['chunk_end'],
+                'excerpt_start' => $match['chunk_start'] - $chunk->overlap_prefix_chars,
+                'excerpt_end' => $match['chunk_end'] - $chunk->overlap_prefix_chars,
                 'canonical_start' => $match['canonical_start'],
                 'canonical_end' => $match['canonical_end'],
             ], $candidate['components']['exact']['matches'] ?? []),

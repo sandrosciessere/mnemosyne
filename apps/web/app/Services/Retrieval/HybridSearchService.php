@@ -50,6 +50,7 @@ class HybridSearchService
         $diagnostics = [
             'generation' => $generation->public_id,
             'mode' => $mode,
+            'reranker_attempted' => false,
             'reranker_used' => false,
             'reranker_fallback_reason' => null,
         ];
@@ -83,13 +84,22 @@ class HybridSearchService
             // mode; in hybrid mode the exact component is skipped with an
             // explicit diagnostic — never silently searched with a known
             // false-negative window.
-            if (mb_strlen($phrase) > (int) config('mnemosyne.retrieval.search.max_exact_phrase_chars')) {
+            // The exact boundary guarantee is a property of the INDEXED
+            // generation (its chunker overlap), not of live config (M2
+            // backlog F3/F4): a later config change must not silently
+            // widen the guaranteed window for an older generation.
+            if (mb_strlen($phrase) > self::maxExactPhraseChars($generation)) {
                 $components['exact'] = [];
                 $diagnostics['exact_skipped_reason'] = 'phrase_too_long';
             } else {
                 $components['exact'] = $this->exact->search(
                     $generation, $readyAssetIds, $phrase, $caseSensitive, $candidatesPerRetriever,
                 );
+                $diagnostics['exact_truncated'] = $this->exact->lastTruncated;
+
+                if ($this->exact->lastQueryShort) {
+                    $diagnostics['exact_short_query'] = true;
+                }
             }
             $timings['exact'] = $this->ms($t);
         }
@@ -129,8 +139,13 @@ class HybridSearchService
         $fused = $this->fusion->fuse($components, $config['fusion']);
         $timings['fusion'] = $this->ms($t);
 
-        // Rerank the top M fused candidates (bounded CPU work).
-        $rerankTopM = (int) config('mnemosyne.retrieval.search.rerank_top_m');
+        // Rerank the top M fused candidates (bounded CPU work). Hard
+        // safety cap: a pathological config value can never send an
+        // unbounded candidate set to the cross-encoder (M2 backlog F21).
+        $rerankTopM = min(
+            max(1, (int) config('mnemosyne.retrieval.search.rerank_top_m')),
+            max(1, (int) config('mnemosyne.retrieval.search.rerank_hard_max', 50)),
+        );
 
         if ($rerank && $fused !== []) {
             $t = hrtime(true);
@@ -178,6 +193,8 @@ class HybridSearchService
             $generation->config['reranker']['model_key'],
         );
 
+        $diagnostics['reranker_attempted'] = true;
+
         try {
             $scores = $provider->rerank(
                 mb_substr($query, 0, 2000),
@@ -195,6 +212,27 @@ class HybridSearchService
                 default => 'reranker_error',
             };
             Log::warning('retrieval.rerank_fallback', ['error' => $exception->getMessage()]);
+
+            return $fused;
+        }
+
+        // Truthfulness (M2 backlog F2): an HTTP 200 with an empty,
+        // malformed or non-finite score set did NOT rerank anything.
+        // Require a usable score for at least half of the head; otherwise
+        // the fused order stands and reranker_used stays false.
+        $scored = 0;
+
+        foreach ($head as $candidate) {
+            if (isset($scores[(string) $candidate['chunk']->id])) {
+                $scored++;
+            }
+        }
+
+        if ($head !== [] && $scored < (int) ceil(count($head) / 2)) {
+            $diagnostics['reranker_used'] = false;
+            $diagnostics['reranker_fallback_reason'] = $scored === 0 ? 'empty_scores' : 'partial_scores';
+            $diagnostics['reranker_model'] = $provider->modelIdentity();
+            Log::warning('retrieval.rerank_unusable', ['scored' => $scored, 'head' => count($head)]);
 
             return $fused;
         }
@@ -221,6 +259,19 @@ class HybridSearchService
         $diagnostics['reranker_model'] = $provider->modelIdentity();
 
         return array_merge($head, $tail);
+    }
+
+    /**
+     * Max exact literal for which the chunk-boundary guarantee holds in
+     * THIS generation: its snapshotted overlap_tail_chars, capped by the
+     * live max_exact_phrase_chars (never wider than the index allows).
+     */
+    public static function maxExactPhraseChars(RetrievalGeneration $generation): int
+    {
+        $overlap = (int) ($generation->config['chunker']['config']['overlap_tail_chars'] ?? 0);
+        $live = (int) config('mnemosyne.retrieval.search.max_exact_phrase_chars');
+
+        return $overlap > 0 ? min($overlap, max($live, 1)) : $live;
     }
 
     private function ms(int|float $since): float

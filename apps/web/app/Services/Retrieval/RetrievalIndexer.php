@@ -38,15 +38,24 @@ class RetrievalIndexer
     /** Hook for newly ready assets: enqueue into the active generation. */
     public function enqueueForActiveGeneration(BookAsset $asset): void
     {
-        $generation = RetrievalGeneration::active();
-
-        if ($generation === null || ! $asset->ingestion_status->isReadyForEnrichment()) {
+        if (! $asset->ingestion_status->isReadyForEnrichment()) {
             return;
         }
 
-        IndexAssetForRetrievalJob::dispatch($generation->id, $asset->id)
-            ->onConnection(config('mnemosyne.ingestion.queue_connection'))
-            ->onQueue(config('mnemosyne.retrieval.queue'));
+        // Newly ready assets are enqueued into the ACTIVE generation AND
+        // into every BUILDING one (M2 backlog F10): a generation under
+        // construction must converge to the complete eligible set, not
+        // silently miss books that became ready mid-build. Generation
+        // isolation is preserved — each job targets one generation.
+        $targets = RetrievalGeneration::query()
+            ->whereIn('status', ['active', 'building'])
+            ->get();
+
+        foreach ($targets as $generation) {
+            IndexAssetForRetrievalJob::dispatch($generation->id, $asset->id)
+                ->onConnection(config('mnemosyne.ingestion.queue_connection'))
+                ->onQueue(config('mnemosyne.retrieval.queue'));
+        }
     }
 
     public function indexAsset(RetrievalGeneration $generation, BookAsset $asset): RetrievalAssetState
@@ -64,6 +73,36 @@ class RetrievalIndexer
         }
 
         try {
+            // Source-changed lifecycle (M2 backlog F9): when the asset's
+            // canonical fingerprint differs from the one this state was
+            // built for, the OLD chunks/embeddings are invalid for the
+            // new source. Rather than poisoning the state forever with
+            // SOURCE_HASH_MISMATCH, rebuild against the new fingerprint:
+            // the state (and its chunks, via chunkAsset's delete+rebuild)
+            // is re-keyed to the current source. Historical grounded
+            // answers stay honest independently — their evidence rows
+            // carry the fingerprint they were built from and go stale
+            // (CITATION_SOURCE_CHANGED) by design.
+            if ($state->source_content_sha256 !== $asset->content_sha256 && $asset->content_sha256 !== null) {
+                Log::info('retrieval.source_changed_rebuild', [
+                    'generation' => $generation->public_id,
+                    'asset' => $asset->public_id,
+                    'old_fingerprint' => $state->source_content_sha256,
+                    'new_fingerprint' => $asset->content_sha256,
+                ]);
+
+                $state->forceFill([
+                    'status' => 'pending',
+                    'source_content_sha256' => (string) $asset->content_sha256,
+                    'source_pipeline_version' => (string) $asset->pipeline_version,
+                    'chunk_count' => 0,
+                    'embedded_count' => 0,
+                    'last_error_code' => null,
+                    'last_error_message' => null,
+                    'finished_at' => null,
+                ])->save();
+            }
+
             $this->verifySourceIdentity($state, $asset);
 
             if ($state->status !== 'embedding' || $state->chunk_count === 0) {

@@ -145,6 +145,10 @@ return [
         // when strict yields zero rows (natural-language queries).
         // Generations snapshotting 1.0.0 keep strict-only behavior.
         'lexical_version' => '1.1.0',
+        // PostgreSQL text-search configuration snapshotted per generation
+        // ('simple' = language-agnostic, multilingual-safe; the indexed
+        // tsvector and query side must always agree).
+        'lexical_config' => env('MNEMOSYNE_LEXICAL_CONFIG', 'simple'),
 
         'embedding' => [
             'model_key' => env('MNEMOSYNE_EMBEDDING_MODEL_KEY', 'e5-small-v1'),
@@ -171,6 +175,8 @@ return [
             // retrieve top N per component → fuse → rerank top M → final K
             'candidates_per_retriever' => (int) env('MNEMOSYNE_SEARCH_CANDIDATES', 40),
             'rerank_top_m' => (int) env('MNEMOSYNE_SEARCH_RERANK_M', 24),
+            // Hard safety cap on rerank candidates regardless of rerank_top_m.
+            'rerank_hard_max' => 50,
             'max_top_k' => 25,
             'default_top_k' => 10,
             'max_query_chars' => 1000,

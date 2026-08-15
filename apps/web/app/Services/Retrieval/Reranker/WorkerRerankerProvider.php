@@ -33,8 +33,17 @@ class WorkerRerankerProvider implements RerankerProvider
 
         $scores = [];
         foreach ($response['scores'] ?? [] as $entry) {
-            if (isset($entry['id']) && isset($entry['score']) && is_finite((float) $entry['score'])) {
-                $scores[(string) $entry['id']] = (float) $entry['score'];
+            // Only genuine finite numbers count (M2 backlog F2): strings
+            // like "NaN"/"Infinity" cast to 0.0 in PHP and would fake a
+            // usable score; nulls and non-numerics are dropped too.
+            if (! is_array($entry) || ! isset($entry['id']) || ! isset($entry['score'])) {
+                continue;
+            }
+
+            $score = $entry['score'];
+
+            if ((is_int($score) || is_float($score)) && is_finite((float) $score)) {
+                $scores[(string) $entry['id']] = (float) $score;
             }
         }
 

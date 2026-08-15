@@ -46,6 +46,15 @@ class AppServiceProvider extends ServiceProvider
             );
         });
 
+        // Neighbor/context expansion is cheap but user-triggered per
+        // click: bound it generously (a reader session paging around a
+        // book stays far below), never below normal UI usage.
+        RateLimiter::for('retrieval-neighbors', function (Request $request) {
+            return Limit::perMinute(120)->by(
+                $request->user()?->id !== null ? 'user:'.$request->user()->id : 'ip:'.$request->ip(),
+            );
+        });
+
         // Grounded answer submission: each answer costs minutes of local
         // model CPU — the per-minute limit complements the per-user
         // active-run cap enforced in the submission service.

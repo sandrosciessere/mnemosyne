@@ -11,7 +11,10 @@ x-app-build: &app-build
 
 services:
   pg:
-    image: pgvector/pgvector:pg17
+    # Pinned to the tested build (PostgreSQL 17.10 + pgvector 0.8.6). A
+    # correctness-sensitive storage component must not float; bump the
+    # digest deliberately, with an integration run, never implicitly.
+    image: pgvector/pgvector:pg17@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${DB_DATABASE}
@@ -202,7 +205,10 @@ services:
   # ------------------------------------------------------------------
   pg-test:
     profiles: ["test"]
-    image: pgvector/pgvector:pg17
+    # Pinned to the tested build (PostgreSQL 17.10 + pgvector 0.8.6). A
+    # correctness-sensitive storage component must not float; bump the
+    # digest deliberately, with an integration run, never implicitly.
+    image: pgvector/pgvector:pg17@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38
     environment:
       POSTGRES_DB: mnemosyne_test
       POSTGRES_USER: mnemosyne_test
