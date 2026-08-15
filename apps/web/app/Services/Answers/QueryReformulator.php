@@ -196,6 +196,46 @@ class QueryReformulator
         return array_slice(array_values($unique), 0, 4);
     }
 
+    /**
+     * Stems of the relation lexicon + perspectives + state terms for a
+     * contract — used by the packet builder to recognise anchor-bearing
+     * units on the focused expansion pass.
+     *
+     * @return list<string>
+     */
+    public function relationAnchorStems(TaskContract $contract): array
+    {
+        $terms = [];
+
+        if ($contract->relationshipType !== null) {
+            $terms = array_merge(
+                TaskContractClassifier::RELATION_LEXICON[$contract->relationshipType] ?? [],
+                self::RELATION_PERSPECTIVES[$contract->relationshipType] ?? [],
+            );
+        }
+
+        if ($contract->answerShape === TaskContract::SHAPE_YES_NO) {
+            foreach (self::STATE_OPPOSITES as $state => $opposite) {
+                $terms[] = $state;
+                foreach (explode(' ', $opposite) as $word) {
+                    $terms[] = $word;
+                }
+            }
+        }
+
+        $stems = [];
+
+        foreach ($terms as $term) {
+            foreach (preg_split('/\s+/u', mb_strtolower($term), -1, PREG_SPLIT_NO_EMPTY) ?: [] as $word) {
+                if (mb_strlen($word) >= 4) {
+                    $stems[] = mb_substr($word, 0, max(4, min(mb_strlen($word) - 1, 7)));
+                }
+            }
+        }
+
+        return array_values(array_unique($stems));
+    }
+
     /** Strip interrogative scaffolding; keep entities, negation, states. */
     public function normalize(string $question): string
     {

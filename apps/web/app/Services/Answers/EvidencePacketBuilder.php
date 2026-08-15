@@ -200,6 +200,19 @@ class EvidencePacketBuilder
             $anchorStems = $contract !== null
                 ? array_map(fn ($a) => mb_substr(mb_strtolower($a), 0, max(4, min(mb_strlen($a) - 1, 7))), $contract->anchorTerms)
                 : [];
+            $isExpansionTarget = in_array($key, $expandKeys, true);
+
+            // On the expansion pass, the asked RELATION/STATE lexicon (and
+            // its perspectives) also counts as anchor: the decisive
+            // sentence often names the relation from the other side
+            // ("la madre dei bambini era morta") without the question's
+            // own words.
+            if ($isExpansionTarget && $contract !== null) {
+                foreach ($this->reformulator->relationAnchorStems($contract) as $stem) {
+                    $anchorStems[] = $stem;
+                }
+                $anchorStems = array_values(array_unique($anchorStems));
+            }
 
             foreach ($fusedByChunk as $entry) {
                 foreach ($unitizer->unitsForChunk($entry['chunk'], [
@@ -216,6 +229,10 @@ class EvidencePacketBuilder
                             $unit->retrievalMeta['anchor_hit'] = true;
                             break;
                         }
+                    }
+
+                    if ($isExpansionTarget) {
+                        $unit->retrievalMeta['expansion_target'] = true;
                     }
 
                     $streams[$key][] = $unit;
@@ -501,6 +518,45 @@ class EvidencePacketBuilder
 
             return true;
         };
+
+        // ── Stage 0: focused-expansion reservation ───────────────────
+        // When this build IS the focused expansion for a subquestion,
+        // that subquestion's NEW evidence must not lose the packet lottery
+        // to the same units that already failed: reserve a share of the
+        // budget (expansion_share, default 40%) for the target stream's
+        // anchor-bearing units, admitted first in relevance order (per-
+        // chunk cap still applies).
+        $targetStreams = array_keys(array_filter($streams, fn ($stream) => $stream !== [] && ! empty($stream[0]->retrievalMeta['expansion_target'])));
+
+        if ($targetStreams !== []) {
+            $reserve = max(1, (int) floor($maxUnits * (float) ($config['expansion_share'] ?? 0.4)));
+            $reservedAdmitted = 0;
+
+            foreach ($targetStreams as $streamKey) {
+                foreach ($streams[$streamKey] as $unit) {
+                    if ($reservedAdmitted >= $reserve) {
+                        break 2;
+                    }
+
+                    if (empty($unit->retrievalMeta['anchor_hit'])) {
+                        continue;
+                    }
+
+                    $chunkKey = $unit->retrievalMeta['chunk_public_id'] ?? spl_object_id($unit);
+
+                    if (($perChunk[$chunkKey] ?? 0) >= $maxPerChunk) {
+                        continue;
+                    }
+
+                    if ($admit($unit)) {
+                        $perChunk[$chunkKey] = ($perChunk[$chunkKey] ?? 0) + 1;
+                        $perRegion[$unit->bookAssetId.':'.$unit->spineIndex] = ($perRegion[$unit->bookAssetId.':'.$unit->spineIndex] ?? 0) + 1;
+                        $unit->retrievalMeta['selection'] = 'expansion_reserve';
+                        $reservedAdmitted++;
+                    }
+                }
+            }
+        }
 
         // ── Stage 1: breadth across chunks / source regions ──────────
         // Within a chunk, units that carry the subquestion's anchor terms

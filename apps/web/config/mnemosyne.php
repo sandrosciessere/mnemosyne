@@ -253,6 +253,9 @@ return [
             // Share of the packet stage 1 (breadth) may fill; the rest is
             // reserved for stage 2 (depth on promising chunks).
             'breadth_share' => (float) env('MNEMOSYNE_ANSWER_BREADTH_SHARE', 0.6),
+            // Share reserved for the focused-expansion target's anchor-
+            // bearing units so new evidence cannot lose the packet lottery.
+            'expansion_share' => (float) env('MNEMOSYNE_ANSWER_EXPANSION_SHARE', 0.4),
         ],
 
         'retrieval' => [
