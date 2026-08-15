@@ -9,6 +9,7 @@ use App\Services\Answers\EvidenceSufficiencyProbe;
 use App\Services\Answers\GroundedAnswerOrchestrator;
 use App\Services\Answers\QueryReformulator;
 use App\Services\Answers\RetrievalPolicyResolver;
+use App\Services\Answers\TaskContract;
 use App\Services\Answers\TaskContractClassifier;
 use App\Services\Retrieval\RetrievalIndexer;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -302,5 +303,57 @@ class RetrievalRecallBenchmarkTest extends TestCase
             'the decisive 4th sentence must reach the packet: '.json_encode(array_map(fn ($t) => mb_substr($t, 0, 40), $texts)),
         );
         $this->assertGreaterThan(0, $packet->stats['depth_units'] + count(array_filter(array_values($packet->units), fn ($u) => ! empty($u->retrievalMeta['anchor_hit']))), 'anchor-first or depth admission must have happened');
+    }
+
+    public function test_expansion_reserve_keys_on_relation_hits_not_entity_mentions(): void
+    {
+        $user = User::factory()->create();
+
+        // Many sentences mention the entity ("Vera disse…") but only ONE
+        // far sentence names the asked relation from the other side.
+        $filler = [];
+        for ($i = 1; $i <= 8; $i++) {
+            $filler[] = "Vera disse al notaio la {$i}ª cosa che le passava per la testa.";
+        }
+        $built = $this->buildArtifacts([
+            0 => [['type' => 'heading', 'text' => 'Il notaio', 'heading_path' => ['Il notaio']], ['text' => implode(' ', $filler)]],
+            1 => [['text' => 'La madre dei figli di Vera era morta di febbre molti anni prima, e Vera non si risposò.']],
+        ]);
+        $generation = $this->makeTestGeneration('active');
+        app(RetrievalIndexer::class)->indexAsset($generation, $built['asset']);
+        $this->grant($built['asset'], $user);
+
+        config(['mnemosyne.answers.evidence.max_units' => 6]);
+
+        // sqlite exact-only: retrieval literal is the entity ("Vera"),
+        // found in BOTH regions; the contract carries the asked spouse/
+        // state dimension so relation_hit tagging + the reserve engage.
+        $spouseContract = (new TaskContractClassifier)->classify('SQ1', 'Vera ha un marito in vita?');
+        $contract = new TaskContract(
+            'SQ1', 'Vera', $spouseContract->taskType, $spouseContract->answerShape,
+            $spouseContract->targetEntityType, null, 'local', $spouseContract->relationshipType,
+            false, true, null, ['vera'],
+        );
+        $reformulator = new QueryReformulator;
+
+        // Expansion build for SQ1 (dedicated expansion queries included).
+        $packet = app(EvidencePacketBuilder::class)->buildForSubquestions(
+            $generation, [$built['asset']->id],
+            [['key' => 'SQ1', 'text' => 'Vera']],
+            (new RetrievalPolicyResolver)->resolve(QueryIntent::PointLookup, 1),
+            ['SQ1' => $contract],
+            ['SQ1'],
+            ['SQ1' => $reformulator->expansionVariants($spouseContract)],
+        );
+
+        $reserved = array_values(array_filter(array_values($packet->units), fn ($u) => ($u->retrievalMeta['selection'] ?? null) === 'expansion_reserve'));
+        $this->assertNotEmpty($reserved, 'reserve must admit relation-bearing units');
+
+        foreach ($reserved as $unit) {
+            $this->assertNotEmpty($unit->retrievalMeta['relation_hit'], 'reserved units must carry the asked relation/state, not just the entity');
+        }
+
+        $texts = array_map(fn ($u) => $u->text, array_values($packet->units));
+        $this->assertTrue((bool) array_filter($texts, fn ($t) => str_contains($t, 'madre dei figli')), 'the perspective-phrased decisive sentence must be in the packet');
     }
 }

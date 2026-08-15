@@ -207,12 +207,9 @@ class EvidencePacketBuilder
             // sentence often names the relation from the other side
             // ("la madre dei bambini era morta") without the question's
             // own words.
-            if ($isExpansionTarget && $contract !== null) {
-                foreach ($this->reformulator->relationAnchorStems($contract) as $stem) {
-                    $anchorStems[] = $stem;
-                }
-                $anchorStems = array_values(array_unique($anchorStems));
-            }
+            $relationStems = ($isExpansionTarget && $contract !== null)
+                ? $this->reformulator->relationAnchorStems($contract)
+                : [];
 
             foreach ($fusedByChunk as $entry) {
                 foreach ($unitizer->unitsForChunk($entry['chunk'], [
@@ -233,6 +230,16 @@ class EvidencePacketBuilder
 
                     if ($isExpansionTarget) {
                         $unit->retrievalMeta['expansion_target'] = true;
+
+                        // Relation/state hit: the unit names the ASKED
+                        // dimension (relation lexicon, perspectives, state
+                        // terms) — the signal the expansion reserve keys on.
+                        foreach ($relationStems as $stem) {
+                            if ($stem !== '' && str_contains($lower, $stem)) {
+                                $unit->retrievalMeta['relation_hit'] = true;
+                                break;
+                            }
+                        }
                     }
 
                     $streams[$key][] = $unit;
@@ -538,7 +545,10 @@ class EvidencePacketBuilder
                         break 2;
                     }
 
-                    if (empty($unit->retrievalMeta['anchor_hit'])) {
+                    // Reserve keys on RELATION/STATE hits (the asked
+                    // dimension), not on mere entity mentions — otherwise
+                    // every "Atticus said…" sentence would qualify.
+                    if (empty($unit->retrievalMeta['relation_hit'])) {
                         continue;
                     }
 
