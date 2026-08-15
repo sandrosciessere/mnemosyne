@@ -197,6 +197,19 @@ class QueryReformulator
     }
 
     /**
+     * Lower-cased stems of the question's proper nouns (entities).
+     *
+     * @return list<string>
+     */
+    public function entityStems(string $question): array
+    {
+        return array_values(array_unique(array_map(
+            fn ($w) => mb_substr(mb_strtolower($w), 0, max(4, min(mb_strlen($w) - 1, 7))),
+            $this->properNouns($question),
+        )));
+    }
+
+    /**
      * Stems of the relation lexicon + perspectives + state terms for a
      * contract — used by the packet builder to recognise anchor-bearing
      * units on the focused expansion pass.

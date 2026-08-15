@@ -210,8 +210,25 @@ class EvidencePacketBuilder
             $relationStems = ($isExpansionTarget && $contract !== null)
                 ? $this->reformulator->relationAnchorStems($contract)
                 : [];
+            $entityStems = ($isExpansionTarget && $contract !== null)
+                ? $this->reformulator->entityStems($contract->question)
+                : [];
 
             foreach ($fusedByChunk as $entry) {
+                // Entity co-presence is evaluated at CHUNK level (first-
+                // person narration says "nostra madre morì" without the
+                // name in that very sentence, but the surrounding chunk
+                // names the family).
+                $chunkLower = mb_strtolower($entry['chunk']->source_text);
+                $chunkHasEntity = $entityStems === [];
+
+                foreach ($entityStems as $stem) {
+                    if ($stem !== '' && str_contains($chunkLower, $stem)) {
+                        $chunkHasEntity = true;
+                        break;
+                    }
+                }
+
                 foreach ($unitizer->unitsForChunk($entry['chunk'], [
                     'branch' => 'subquestion',
                     'subquestion' => $key,
@@ -233,11 +250,16 @@ class EvidencePacketBuilder
 
                         // Relation/state hit: the unit names the ASKED
                         // dimension (relation lexicon, perspectives, state
-                        // terms) — the signal the expansion reserve keys on.
-                        foreach ($relationStems as $stem) {
-                            if ($stem !== '' && str_contains($lower, $stem)) {
-                                $unit->retrievalMeta['relation_hit'] = true;
-                                break;
+                        // terms) AND a question entity — the signal the
+                        // expansion reserve keys on. Entity co-presence is
+                        // required so relations about OTHER people ("morì
+                        // la vecchia signora Radley") do not qualify.
+                        if ($chunkHasEntity) {
+                            foreach ($relationStems as $stem) {
+                                if ($stem !== '' && str_contains($lower, $stem)) {
+                                    $unit->retrievalMeta['relation_hit'] = true;
+                                    break;
+                                }
                             }
                         }
                     }
