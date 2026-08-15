@@ -10,7 +10,9 @@ export default function Welcome() {
             <div className="flex min-h-screen flex-col items-center justify-center bg-neutral-50 p-6 text-neutral-900 dark:bg-neutral-950 dark:text-neutral-50">
                 <main className="flex w-full max-w-xl flex-col items-center gap-6 text-center">
                     <h1 className="text-4xl font-semibold tracking-tight">Mnemosyne</h1>
-                    <p className="text-lg text-neutral-600 dark:text-neutral-400">AI-powered library analysis, retrieval and research platform.</p>
+                    <p className="text-lg text-neutral-600 dark:text-neutral-400">
+                        AI-powered library analysis and grounded answers over your EPUB library.
+                    </p>
                     <div className="flex gap-3">
                         {auth.user ? (
                             <Link

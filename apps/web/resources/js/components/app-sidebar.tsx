@@ -6,9 +6,9 @@ import { type NavItem, type SharedData } from '@/types';
 import { Link, usePage } from '@inertiajs/react';
 import {
     BookOpen,
-    Folder,
+    Gauge,
+    Github,
     Inbox,
-    LayoutGrid,
     Library,
     ListChecks,
     MessageSquareQuote,
@@ -24,7 +24,7 @@ const mainNavItems: NavItem[] = [
     {
         title: 'Dashboard',
         url: '/dashboard',
-        icon: LayoutGrid,
+        icon: Gauge,
     },
     {
         title: 'Library',
@@ -85,7 +85,7 @@ const footerNavItems: NavItem[] = [
     {
         title: 'Repository',
         url: 'https://github.com/sandrosciessere/mnemosyne',
-        icon: Folder,
+        icon: Github,
     },
 ];
 

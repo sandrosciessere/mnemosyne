@@ -21,7 +21,7 @@ declare global {
         url: window.location.origin,
     })) as typeof routeFn;
 
-const appName = import.meta.env.VITE_APP_NAME || 'Laravel';
+const appName = import.meta.env.VITE_APP_NAME || 'Mnemosyne';
 
 createInertiaApp({
     title: (title) => `${title} - ${appName}`,
