@@ -216,7 +216,7 @@ class QueryReformulator
      *
      * @return list<string>
      */
-    public function relationAnchorStems(TaskContract $contract): array
+    public function relationAnchorStems(TaskContract $contract, bool $includeStates = true): array
     {
         $terms = [];
 
@@ -227,7 +227,7 @@ class QueryReformulator
             );
         }
 
-        if ($contract->answerShape === TaskContract::SHAPE_YES_NO) {
+        if ($includeStates && $contract->answerShape === TaskContract::SHAPE_YES_NO) {
             foreach (self::STATE_OPPOSITES as $state => $opposite) {
                 $terms[] = $state;
                 foreach (explode(' ', $opposite) as $word) {
@@ -236,14 +236,31 @@ class QueryReformulator
             }
         }
 
+        // Generic function words inside multiword perspectives ("la
+        // moglie DI", "mother OF his CHILDREN", "his LATE wife") must not
+        // become stems.
+        $ignore = ['della', 'delle', 'degli', 'dei', 'del', 'sua', 'suo', 'his', 'her', 'the', 'late', 'with', 'con', 'children', 'figli', 'figlio', 'figlia', 'casa', 'vive', 'abita', 'lives', 'house', 'next', 'door', 'parte', 'strada', 'street', 'across'];
         $stems = [];
 
         foreach ($terms as $term) {
             foreach (preg_split('/\s+/u', mb_strtolower($term), -1, PREG_SPLIT_NO_EMPTY) ?: [] as $word) {
-                if (mb_strlen($word) >= 4) {
+                if (mb_strlen($word) >= 4 && ! in_array($word, $ignore, true)) {
                     $stems[] = mb_substr($word, 0, max(4, min(mb_strlen($word) - 1, 7)));
                 }
             }
+        }
+
+        // Neighbor perspectives are phrase-level ("casa accanto"): keep
+        // their distinctive words explicitly.
+        if ($contract->relationshipType === 'neighbor') {
+            array_push($stems, 'accant', 'vicin', 'confin', 'neighb', 'beside');
+        }
+
+        // Child/family relations expressed as "madre dei figli / padre dei
+        // figli": keep the parent nouns explicitly (the ignore list drops
+        // the generic 'figli').
+        if (in_array($contract->relationshipType, ['spouse', 'parent', 'child'], true)) {
+            array_push($stems, 'madre', 'padre', 'mothe', 'fathe');
         }
 
         return array_values(array_unique($stems));

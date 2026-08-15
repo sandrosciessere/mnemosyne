@@ -207,8 +207,16 @@ class EvidencePacketBuilder
             // sentence often names the relation from the other side
             // ("la madre dei bambini era morta") without the question's
             // own words.
+            // Two tiers: specific relation stems (lexicon + perspectives)
+            // and, weaker, bare state stems ('vita'/'mort'). The reserve
+            // admits relation-hit units first; state-only hits are a
+            // fallback tier so ubiquitous words cannot crowd out the
+            // decisive relation sentence.
             $relationStems = ($isExpansionTarget && $contract !== null)
-                ? $this->reformulator->relationAnchorStems($contract)
+                ? $this->reformulator->relationAnchorStems($contract, includeStates: false)
+                : [];
+            $stateStems = ($isExpansionTarget && $contract !== null)
+                ? array_values(array_diff($this->reformulator->relationAnchorStems($contract, includeStates: true), $relationStems))
                 : [];
             $entityStems = ($isExpansionTarget && $contract !== null)
                 ? $this->reformulator->entityStems($contract->question)
@@ -260,6 +268,19 @@ class EvidencePacketBuilder
                                     $unit->retrievalMeta['relation_hit'] = true;
                                     break;
                                 }
+                            }
+
+                            foreach ($stateStems as $stem) {
+                                if ($stem !== '' && str_contains($lower, $stem)) {
+                                    $unit->retrievalMeta['state_hit'] = true;
+                                    break;
+                                }
+                            }
+
+                            // Strongest signal: relation AND state in the
+                            // same sentence ("la madre … era morta").
+                            if (! empty($unit->retrievalMeta['relation_hit']) && ! empty($unit->retrievalMeta['state_hit'])) {
+                                $unit->retrievalMeta['relation_state_hit'] = true;
                             }
                         }
                     }
@@ -561,30 +582,31 @@ class EvidencePacketBuilder
             $reserve = max(1, (int) floor($maxUnits * (float) ($config['expansion_share'] ?? 0.4)));
             $reservedAdmitted = 0;
 
-            foreach ($targetStreams as $streamKey) {
-                foreach ($streams[$streamKey] as $unit) {
-                    if ($reservedAdmitted >= $reserve) {
-                        break 2;
-                    }
+            // Pass 1: relation hits (the asked relation named), pass 2:
+            // state-only hits — never mere entity mentions.
+            foreach (['relation_state_hit', 'relation_hit', 'state_hit'] as $tier) {
+                foreach ($targetStreams as $streamKey) {
+                    foreach ($streams[$streamKey] as $unit) {
+                        if ($reservedAdmitted >= $reserve) {
+                            break 3;
+                        }
 
-                    // Reserve keys on RELATION/STATE hits (the asked
-                    // dimension), not on mere entity mentions — otherwise
-                    // every "Atticus said…" sentence would qualify.
-                    if (empty($unit->retrievalMeta['relation_hit'])) {
-                        continue;
-                    }
+                        if (empty($unit->retrievalMeta[$tier]) || isset($unit->key) && $unit->key !== '') {
+                            continue;
+                        }
 
-                    $chunkKey = $unit->retrievalMeta['chunk_public_id'] ?? spl_object_id($unit);
+                        $chunkKey = $unit->retrievalMeta['chunk_public_id'] ?? spl_object_id($unit);
 
-                    if (($perChunk[$chunkKey] ?? 0) >= $maxPerChunk) {
-                        continue;
-                    }
+                        if (($perChunk[$chunkKey] ?? 0) >= $maxPerChunk) {
+                            continue;
+                        }
 
-                    if ($admit($unit)) {
-                        $perChunk[$chunkKey] = ($perChunk[$chunkKey] ?? 0) + 1;
-                        $perRegion[$unit->bookAssetId.':'.$unit->spineIndex] = ($perRegion[$unit->bookAssetId.':'.$unit->spineIndex] ?? 0) + 1;
-                        $unit->retrievalMeta['selection'] = 'expansion_reserve';
-                        $reservedAdmitted++;
+                        if ($admit($unit)) {
+                            $perChunk[$chunkKey] = ($perChunk[$chunkKey] ?? 0) + 1;
+                            $perRegion[$unit->bookAssetId.':'.$unit->spineIndex] = ($perRegion[$unit->bookAssetId.':'.$unit->spineIndex] ?? 0) + 1;
+                            $unit->retrievalMeta['selection'] = 'expansion_reserve';
+                            $reservedAdmitted++;
+                        }
                     }
                 }
             }
