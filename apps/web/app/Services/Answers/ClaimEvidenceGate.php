@@ -352,6 +352,38 @@ class ClaimEvidenceGate
         return $found / count($stems) >= 0.7;
     }
 
+    /**
+     * Packet-wide deterministic scan for an atom that EXPLICITLY
+     * predicates the claim value of its subject (copula/apposition).
+     * Used only to FOCUS one gate-informed verifier retry when the model
+     * answered `none` for an atomic fact that the source states plainly
+     * — never to certify by itself.
+     *
+     * @return list<string> fully-qualified atom keys, best first
+     */
+    public function structurallyConfirmingAtoms(string $claimText, EvidencePacket $packet, int $max = 3): array
+    {
+        if ($this->types->classify($claimText) !== ClaimTypeClassifier::ATOMIC_FACT) {
+            return [];
+        }
+
+        $found = [];
+
+        foreach ($packet->units as $unitKey => $unit) {
+            foreach ($unit->atoms as $atomKey => $atom) {
+                if ($this->structuralSupport($claimText, [$atom]) === 'confirmed') {
+                    $found[] = $unitKey.'.'.$atomKey;
+
+                    if (count($found) >= $max) {
+                        return $found;
+                    }
+                }
+            }
+        }
+
+        return $found;
+    }
+
     /** Scan sibling atoms of the verifier-cited units for explicit predication. */
     private function findConfirmingSiblingAtom(string $claimText, VerificationResult $verdict, EvidencePacket $packet): ?string
     {

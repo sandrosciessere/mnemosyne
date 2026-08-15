@@ -351,6 +351,34 @@ class GroundedAnswerOrchestrator
                     }
                 }
 
+                // ONE bounded gate-informed retry for `none` on an ATOMIC
+                // fact that the packet states explicitly (deterministic
+                // copula/apposition scan): point the verifier at the exact
+                // asserting atom(s). It re-verifies — nothing is certified
+                // by the application alone. Measured 8B failure mode:
+                // "Tomas, il figlio di Marek" answered none.
+                if (! $protocolError && $verdict->supportLevel === 'none') {
+                    $confirming = $this->gate->structurallyConfirmingAtoms($claim->text, $packet);
+
+                    if ($confirming !== []) {
+                        $gateMs += $this->ms($g);
+                        Log::info('answers.gate_informed_none_recheck', ['run' => $run->public_id, 'claim' => $claim->claimKey, 'atoms' => $confirming]);
+
+                        try {
+                            $verdict = $verifier->verify(
+                                $run->question, $packet, $claim,
+                                'the evidence contains sentence(s) that appear to state this claim explicitly: '.implode(', ', $confirming)
+                                .'. Re-check ONLY those atoms: if they directly state the claim answer "direct" citing them; if they truly do not, answer "none".',
+                                $subquestionTexts[$subquestionKey] ?? null,
+                            );
+                            $g = hrtime(true);
+                            $gateResult = $this->gate->evaluate($claim, $verdict, $packet);
+                        } catch (ProviderInvalidOutputException) {
+                            $g = hrtime(true);
+                        }
+                    }
+                }
+
                 // Relevance: only claims that survived the evidence gate.
                 $relevanceResult = ['result' => null, 'reason' => null];
 
