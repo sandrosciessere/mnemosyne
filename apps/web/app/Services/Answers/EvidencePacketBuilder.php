@@ -197,6 +197,10 @@ class EvidencePacketBuilder
 
             uasort($fusedByChunk, fn ($a, $b) => $b['score'] <=> $a['score'] ?: $a['best_rank'] <=> $b['best_rank']);
 
+            $anchorStems = $contract !== null
+                ? array_map(fn ($a) => mb_substr(mb_strtolower($a), 0, max(4, min(mb_strlen($a) - 1, 7))), $contract->anchorTerms)
+                : [];
+
             foreach ($fusedByChunk as $entry) {
                 foreach ($unitizer->unitsForChunk($entry['chunk'], [
                     'branch' => 'subquestion',
@@ -205,6 +209,15 @@ class EvidencePacketBuilder
                     'variants' => array_values(array_unique($entry['variants'])),
                     'fused_score' => round($entry['score'], 5),
                 ]) as $unit) {
+                    $lower = mb_strtolower($unit->text);
+
+                    foreach ($anchorStems as $stem) {
+                        if ($stem !== '' && str_contains($lower, $stem)) {
+                            $unit->retrievalMeta['anchor_hit'] = true;
+                            break;
+                        }
+                    }
+
                     $streams[$key][] = $unit;
                 }
             }
@@ -355,6 +368,46 @@ class EvidencePacketBuilder
      * @param  array<string, list<EvidenceUnit>>  $streams
      */
     /**
+     * Stable re-ordering INSIDE each (chunk, subquestion) group: units
+     * whose text contains an anchor term of their subquestion (recorded
+     * by the retrieval stage in retrievalMeta['anchor_hit']) come first;
+     * relative order otherwise preserved. Cross-chunk order untouched.
+     *
+     * @param  list<EvidenceUnit>  $sequence
+     * @return list<EvidenceUnit>
+     */
+    private function prioritizeAnchorUnits(array $sequence): array
+    {
+        $groups = [];
+        $order = [];
+
+        foreach ($sequence as $index => $unit) {
+            $key = ($unit->retrievalMeta['chunk_public_id'] ?? spl_object_id($unit)).'|'.($unit->retrievalMeta['subquestion'] ?? '-');
+            $groups[$key][] = $index;
+            $order[] = $key;
+        }
+
+        $reordered = [];
+        $emitted = [];
+
+        foreach ($order as $key) {
+            if (isset($emitted[$key])) {
+                continue;
+            }
+            $emitted[$key] = true;
+            $indexes = $groups[$key];
+            $hits = array_values(array_filter($indexes, fn ($i) => ! empty($sequence[$i]->retrievalMeta['anchor_hit'])));
+            $rest = array_values(array_filter($indexes, fn ($i) => empty($sequence[$i]->retrievalMeta['anchor_hit'])));
+
+            foreach (array_merge($hits, $rest) as $i) {
+                $reordered[] = $sequence[$i];
+            }
+        }
+
+        return $reordered;
+    }
+
+    /**
      * Two-stage, diversity-aware packet selection.
      *
      * Stage 1 (BREADTH): walk the fused/interleaved candidate sequence
@@ -412,6 +465,17 @@ class EvidencePacketBuilder
         $perChunk = [];
         $perRegion = [];
         $deferred = [];
+        // Breadth may take at most this share of the packet; the rest is
+        // reserved for depth (held-back units of promising chunks). With
+        // several subquestions round-robin breadth alone would fill the
+        // budget and the decisive later sentence of a top chunk would
+        // never make it in.
+        // Only meaningful when several streams compete (compound
+        // questions / multi-book); a single stream keeps pure relevance
+        // order with per-chunk caps only.
+        $breadthCap = ($interleave && count($streams) > 1)
+            ? max(1, (int) floor($maxUnits * (float) ($config['breadth_share'] ?? 0.6)))
+            : $maxUnits;
 
         $admit = function (EvidenceUnit $unit) use (&$selected, &$seen, &$chars, &$droppedDuplicates, &$droppedBudget, $maxUnits, $maxChars): bool {
             $identity = $unit->identity();
@@ -439,11 +503,20 @@ class EvidencePacketBuilder
         };
 
         // ── Stage 1: breadth across chunks / source regions ──────────
+        // Within a chunk, units that carry the subquestion's anchor terms
+        // are admitted FIRST (they are the ones likely to hold the
+        // asked fact), then the remaining sentences in order.
+        if ($interleave && count($streams) > 1) {
+            $sequence = $this->prioritizeAnchorUnits($sequence);
+        }
+
         foreach ($sequence as $unit) {
             $chunkKey = $unit->retrievalMeta['chunk_public_id'] ?? spl_object_id($unit);
             $regionKey = $unit->bookAssetId.':'.$unit->spineIndex;
 
-            if (($perChunk[$chunkKey] ?? 0) >= $maxPerChunk || ($perRegion[$regionKey] ?? 0) >= $maxPerRegion) {
+            if (count($selected) >= $breadthCap
+                || ($perChunk[$chunkKey] ?? 0) >= $maxPerChunk
+                || ($perRegion[$regionKey] ?? 0) >= $maxPerRegion) {
                 $deferred[] = $unit;
                 $heldForDepth++;
 
@@ -457,7 +530,32 @@ class EvidencePacketBuilder
             }
         }
 
-        // ── Stage 2: depth — held-back units in relevance order ──────
+        // ── Stage 2: depth — held-back units ─────────────────────────
+        // Interleaved (multi-stream) packets keep stream fairness in the
+        // depth pass too (round-robin across the streams' deferred
+        // units); single-stream packets take them in relevance order.
+        if ($interleave && count($streams) > 1) {
+            $byStream = [];
+
+            foreach ($deferred as $unit) {
+                $byStream[$unit->retrievalMeta['subquestion'] ?? $unit->bookAssetId][] = $unit;
+            }
+
+            $deferred = [];
+            $exhausted = false;
+
+            for ($round = 0; ! $exhausted; $round++) {
+                $exhausted = true;
+
+                foreach ($byStream as $list) {
+                    if (isset($list[$round])) {
+                        $deferred[] = $list[$round];
+                        $exhausted = false;
+                    }
+                }
+            }
+        }
+
         foreach ($deferred as $unit) {
             if (count($selected) >= $maxUnits) {
                 $droppedBudget++;

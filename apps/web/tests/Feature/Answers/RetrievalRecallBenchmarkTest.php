@@ -244,4 +244,63 @@ class RetrievalRecallBenchmarkTest extends TestCase
         $this->assertNotEmpty($diag['expansion_queries']['SQ1'] ?? [], 'dedicated expansion queries persisted');
         $this->assertNotSame('THIN_PACKET', $diag['expansion_trigger'], 'trigger must be sufficiency-based, not unit count');
     }
+
+    public function test_decisive_sentence_beyond_breadth_cap_reaches_the_packet_in_compound_questions(): void
+    {
+        $user = User::factory()->create();
+
+        // Real-QA shape: THREE subquestions; the top chunk for SQ3 has
+        // its decisive sentence ("occhiali") only as its 4th sentence.
+        // With per-chunk breadth cap 3 and round-robin over 3 SQs, a
+        // pure-breadth packet would fill up before depth ever reached
+        // sentence 4 — anchor-first ordering + reserved depth share fix
+        // that.
+        $scene = 'Il vecchio Rado uscì sulla strada polverosa. Tutti tacquero al suo passaggio. Il cane zoppo lo seguiva da lontano. Poi il vecchio Rado si tolse gli occhiali appannati e li fece cadere sul selciato, dove si ruppero.';
+        $built = $this->buildArtifacts([
+            0 => [
+                ['type' => 'heading', 'text' => 'La strada', 'heading_path' => ['La strada']],
+                ['text' => $scene],
+            ],
+            1 => [['text' => 'Rado aveva la mira infallibile e centrava la banderuola ogni volta che sparava al mattino.']],
+            2 => [['text' => 'Nella piazza Rado dovette sparare due volte per fermare il cane rabbioso.']],
+        ]);
+        $generation = $this->makeTestGeneration('active');
+        app(RetrievalIndexer::class)->indexAsset($generation, $built['asset']);
+        $this->grant($built['asset'], $user);
+
+        config([
+            'mnemosyne.answers.evidence.max_units' => 9,
+            'mnemosyne.answers.evidence.max_initial_units_per_chunk' => 2,
+        ]);
+
+        // sqlite exact-only: each SQ carries a literal from its scene.
+        $subquestions = [
+            ['key' => 'SQ1', 'text' => 'Rado aveva la mira infallibile?'],
+            ['key' => 'SQ2', 'text' => 'Rado dovette sparare?'],
+            ['key' => 'SQ3', 'text' => 'Cosa succede agli occhiali del vecchio Rado?'],
+        ];
+        $classifier = new TaskContractClassifier;
+        $contracts = [];
+        foreach ($subquestions as $sq) {
+            $contracts[$sq['key']] = $classifier->classify($sq['key'], $sq['text']);
+        }
+        // Force the exact literal used for retrieval on SQ3 to be the
+        // scene chunk (which contains "occhiali" only in sentence 4 —
+        // but the chunk itself matches "vecchio Rado" from sentence 1).
+        $subquestions[2]['text'] = 'vecchio Rado';
+        $contracts['SQ3'] = $classifier->classify('SQ3', 'occhiali vecchio Rado');
+
+        $packet = app(EvidencePacketBuilder::class)->buildForSubquestions(
+            $generation, [$built['asset']->id], $subquestions,
+            (new RetrievalPolicyResolver)->resolve(QueryIntent::PointLookup, 1),
+            $contracts,
+        );
+
+        $texts = array_map(fn ($u) => $u->text, array_values($packet->units));
+        $this->assertTrue(
+            (bool) array_filter($texts, fn ($t) => str_contains($t, 'occhiali')),
+            'the decisive 4th sentence must reach the packet: '.json_encode(array_map(fn ($t) => mb_substr($t, 0, 40), $texts)),
+        );
+        $this->assertGreaterThan(0, $packet->stats['depth_units'] + count(array_filter(array_values($packet->units), fn ($u) => ! empty($u->retrievalMeta['anchor_hit']))), 'anchor-first or depth admission must have happened');
+    }
 }
